@@ -1,0 +1,18 @@
+# Feature Log
+- [x] Push flow key to Falkor
+- [x] Add stats to falkor edge
+- [x] Fix the arp->arp bug
+- [x] Switch to using packet timestamp instead of system time
+- [x] Use redis to save save PayloadSet
+- [x] Test redis integration
+- [x] Switch to bidirectional flow tracking
+- [x] Add basic command line interface with pcap file path
+- [x] Add devices to the graph database
+- [x] Figure out how to update/add flows without unintenionally creating duplicates
+- [x] Add command line option to enable/disable Falkor and enable/disable the paylaodset to redis functionality
+- [ ] Push flow to Falkor when a flow ends (after timeout or TCP FIN/RST?)
+- [ ] Add more features to flow stats (e.g., TCP flags, packet sizes, etc.)
+- [ ] Switch to creating periodic feature updates and merging new flows if they occur
+- [ ] create seperate threads for feature extraction and falkor/redis interactions
+- [ ] Figure out how to handle http outbound ports (random high ports)
+- [ ] Rework the directionality logic to be more robust and efficient
