@@ -7,7 +7,7 @@
   "dockerComposeBuild": {
     "projectName": "pretrainedtrafficmodels"
   },
-  "workspaceFolder": "/workspace",
+  "workspaceFolder": "/home/plb41586/workspace",
   "runArgs": [], // handled via docker-compose now
   "customizations": {
     "vscode": {

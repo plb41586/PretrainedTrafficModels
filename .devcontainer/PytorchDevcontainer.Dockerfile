@@ -2,12 +2,16 @@ FROM pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
 
 # User Arguments
 ARG USERNAME=plb41586
-ARG USER_UID=1996
-ARG USER_GID=1996
+ARG USER_UID=1000
+ARG USER_GID=1000
 
 # Install Sudo
 RUN apt-get update
 RUN apt-get install -y sudo
+
+# Move the existing user (e.g., "someuser") from 1000 to something else
+RUN usermod -u 1500 ubuntu && \
+    groupmod -g 1500 ubuntu
 
 # Create the user and group
 RUN groupadd --gid $USER_GID $USERNAME \
@@ -33,6 +37,9 @@ USER $USERNAME
 
 # Get Rust
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
+
+# Create Workspace directory
+RUN mkdir /home/$USERNAME/workspace
 
 USER root
 

@@ -3,7 +3,7 @@ services:
     build:
       context: ..
       dockerfile: .devcontainer/PytorchDevcontainer.Dockerfile
-    user: "1996:1996"
+    user: "1000:1000"
     # deploy:
       # resources:
         # reservations:
@@ -12,9 +12,9 @@ services:
             #   count: 1
             #   capabilities: [gpu]
     volumes:
-      - ..:/workspace:cached
+      - ..:/home/plb41586/workspace:cached
       # - /home/plb41586/projects/Datasets/Smart_Factory_Dataset:/data:ro
-      - /home/plb41586/projects/Datasets/CICAPT-IIoT:/workspace/data:rw
+      - /home/plb41586/projects/Datasets/CICAPT-IIoT:/home/plb41586/workspace/data:rw
     depends_on:
       - redis
     networks:
