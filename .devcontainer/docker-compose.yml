@@ -4,17 +4,17 @@ services:
       context: ..
       dockerfile: .devcontainer/PytorchDevcontainer.Dockerfile
     user: "1000:1000"
-    # deploy:
-      # resources:
-        # reservations:
-          # devices:
-            # - driver: nvidia
-            #   count: 1
-            #   capabilities: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     volumes:
       - ..:/home/plb41586/workspace:cached
       # - /home/plb41586/projects/Datasets/Smart_Factory_Dataset:/data:ro
-      - /home/plb41586/projects/Datasets/CICAPT-IIoT:/home/plb41586/workspace/data:rw
+      - /home/plb41586/projects/Datasets:/home/plb41586/workspace/data:rw
     depends_on:
       - redis
     networks:

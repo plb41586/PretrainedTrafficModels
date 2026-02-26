@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
+FROM pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
 
 # User Arguments
 ARG USERNAME=plb41586
@@ -57,6 +57,7 @@ RUN /home/$USERNAME/app/venv/bin/pip install seaborn
 RUN /home/$USERNAME/app/venv/bin/pip install jupyterlab
 RUN /home/$USERNAME/app/venv/bin/pip install notebook
 RUN /home/$USERNAME/app/venv/bin/pip install ipykernel
+RUN /home/$USERNAME/app/venv/bin/pip install mamba-ssm[dev]
 
 USER $USERNAME
 ENV PATH=/home/$USERNAME/app/venv/bin:$PATH
