@@ -1,0 +1,37 @@
+services:
+  devcontainer:
+    build:
+      context: ..
+      dockerfile: .devcontainer/PytorchDevcontainer.Dockerfile
+    user: "1996:1996"
+    # deploy:
+      # resources:
+        # reservations:
+          # devices:
+            # - driver: nvidia
+            #   count: 1
+            #   capabilities: [gpu]
+    volumes:
+      - ..:/workspace:cached
+      # - /home/plb41586/projects/Datasets/Smart_Factory_Dataset:/data:ro
+      - /home/plb41586/projects/Datasets/CICAPT-IIoT:/workspace/data:rw
+    depends_on:
+      - redis
+    networks:
+      - devnet
+    command: sleep infinity
+    container_name: devcontainer
+
+  redis:
+    image: redis:8.2.5-bookworm
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_ARGS=--save '' --appendonly no
+    networks:
+      - devnet
+    container_name: redis
+
+networks:
+  devnet:
+    external: true
