@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from mamba_ssm import Mamba
 from dataclasses import dataclass
+from DataUtils import ID_Encoder
 
 @dataclass
 class ModelParams:
@@ -350,8 +351,7 @@ class SequenceClassifier(nn.Module):
                  vocab_size: int, 
                  embedding_dim: int, 
                  seq_lvl_dim: int, 
-                 latent_len: int, 
-                 sequence_length: int,
+                 packets_per_sequence: int, 
                  num_classes: int, 
                  device: torch.device,
                  PacketEncoder: nn.Module):
@@ -376,7 +376,7 @@ class SequenceClassifier(nn.Module):
 
         self.embedding_dim = embedding_dim
         self.seq_lvl_dim = seq_lvl_dim
-        self.latent_len = latent_len + 1 # account for CLS token 
+        self.latent_len = packets_per_sequence # account for CLS token 
         self.vocab_size = vocab_size
         self.output = nn.Linear(seq_lvl_dim, num_classes).to(device)
 
@@ -460,41 +460,6 @@ class SequenceClassifier(nn.Module):
         output = self.output(h)
         return output
 
-# class ClassifierModel(nn.Module):
-#     def __init__(self, Backbone, Embedding, EmbeddingDim, latent_dim, NumClasses, latent_len, device: torch.device):
-#         super().__init__()
-#         self.embedding = Embedding.to(device)
-#         self.backbone = Backbone.to(device)
-#         self.output = nn.Linear(latent_dim*latent_len, NumClasses, bias=False).to(device)
-
-#     def forward(self, tokens:torch.Tensor):
-#         """
-#         Forward pass of the model. Returns the raw classifier logits.
-#         Args:
-#             tokens (torch.Tensor): The input tokens.
-#         Returns:
-#             torch.Tensor: The raw logits.
-#         """
-#         h = self.embedding(tokens)
-#         h = self.backbone(h)
-#         h = h.contiguous()
-#         h = h.view(-1, h.size(1) * h.size(2))
-#         output = self.output(h)
-#         return output
-
-#     def predict(self, tokens:torch.Tensor):
-#         """
-#         Predict the attack label class probabilities.
-#         Args:
-#             tokens (torch.Tensor): The input tokens.
-#         Returns:
-#             torch.Tensor: The class probabilities.
-#         """
-#         logits = self(tokens)
-#         return torch.softmax(logits, dim=-1)
-
-
-
 class HierarchicalModel(nn.Module):
     def __init__(self, n, emb_dim, latent_len, num_classes, embedding, encoder):
         super(HierarchicalModel, self).__init__()
@@ -525,15 +490,16 @@ class HierarchicalModel(nn.Module):
 
 
 if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # --- Config ---
     vocab_size = 260
-    emb_dim = 64
-    seq_lvl_dim = 64
-    packet_len = 1520       # token length per packet
-    latent_len = 1           # encoder output length per packet (after pooling)
-    seq_len = 16             # max packets per sequence
-    num_classes = 5
-    batch_size = 4
+    emb_dim = 32
+    seq_lvl_dim = 32
+    bytes_per_packet = 1520       # token length per packet
+    packets_per_sequence = 64             # max packets per sequence
+    num_classes = 14
+    batch_size = 32
 
     print(f"Device: {device}")
     print("Building Packet_Encoder...")
@@ -542,9 +508,9 @@ if __name__ == "__main__":
     encoder = Packet_Encoder(
         vocab_size=vocab_size,
         embedding_dim=emb_dim,
-        input_len=packet_len,
+        input_len=bytes_per_packet,
         latent_dim=emb_dim,
-        latent_len=latent_len,
+        latent_len=1,
         num_classes=num_classes,
         device=device,
         Pooling=CLSPooling(),
@@ -555,37 +521,44 @@ if __name__ == "__main__":
         vocab_size=vocab_size,
         embedding_dim=emb_dim,
         seq_lvl_dim=seq_lvl_dim,
-        latent_len=latent_len,
-        sequence_length=seq_len,
+        packets_per_sequence=packets_per_sequence,
         num_classes=num_classes,
         device=device,
         PacketEncoder=encoder,
     )
 
+    # CLS (Classify) token replaces Start Of Sequence  token
+    TokenIDEncoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259}, CLS_Placement="EOS")
+
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
 
     # --- Generate random data ---
-    # Each batch item: (seq_len+1, packet_len) — +1 for the CLS slot
-    # seq_lens: actual number of packets per sample (CLS goes at this index)
-    tokens = torch.randint(0, vocab_size, (batch_size, seq_len + 1, packet_len)).to(device)
-    seq_lens = torch.randint(1, seq_len, (batch_size,))  # random lengths in [1, seq_len)
+    data_samples = []
+    passes = 1
+    for i in range(passes):
+        input_data = torch.randint(0, vocab_size-1, (batch_size, packets_per_sequence, bytes_per_packet)).to(device)
+        data_samples.append(input_data)
+    PackSeqLens = torch.randint(1, packets_per_sequence, (batch_size,))
 
-    print(f"\nInput tokens shape:  {tokens.shape}")
-    print(f"Sequence lengths:    {seq_lens.tolist()}")
+    PackSeqLens = PackSeqLens.to(device)
+    # print(f"\nInput tokens shape:  {tokens.shape}")
+    # print(f"Sequence lengths:    {seq_lens.tolist()}")
 
     # --- Forward pass (loop version) ---
     print("\n--- forward (loop) ---")
-    model.eval()
+    model.eval().to(device)
     with torch.no_grad():
-        logits = model(tokens, seq_lens)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        
+        for i in range(passes):
+            logits = model.forward(data_samples[i], PackSeqLens)
+            logits_ff = model.forward_ff(data_samples[i], PackSeqLens)
+
     print(f"Output logits shape: {logits.shape}")  # expect (batch_size, num_classes)
     print(f"Logits:\n{logits}")
 
-    # --- Forward pass (fast/flat version) ---
-    print("\n--- forward_ff (batched) ---")
-    with torch.no_grad():
-        logits_ff = model.forward_ff(tokens, seq_lens)
     print(f"Output logits shape: {logits_ff.shape}")
     print(f"Logits:\n{logits_ff}")
 
