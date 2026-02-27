@@ -57,6 +57,7 @@ RUN /home/$USERNAME/app/venv/bin/pip install seaborn
 RUN /home/$USERNAME/app/venv/bin/pip install jupyterlab
 RUN /home/$USERNAME/app/venv/bin/pip install notebook
 RUN /home/$USERNAME/app/venv/bin/pip install ipykernel
+RUN /home/$USERNAME/app/venv/bin/pip install causal-conv1d
 RUN /home/$USERNAME/app/venv/bin/pip install mamba-ssm[dev]
 
 USER $USERNAME
