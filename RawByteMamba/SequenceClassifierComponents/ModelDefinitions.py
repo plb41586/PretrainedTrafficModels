@@ -26,124 +26,6 @@ class ModelParams:
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-class ConvSequenceReducer(nn.Module):
-    '''
-    Convolutional Sequence Reducer
-
-    This module reduces the sequence length of an input tensor using a depthwise 1D convolution. 
-    It processes input sequences along the temporal dimension by applying a convolution with a 
-    kernel size and stride of 4, effectively downsampling the sequence length by a factor of 4 
-    while preserving the number of features (channels). 
-
-    Args:
-        input_dim (int): The number of input features (channels).
-
-    Shape:
-        - Input: (batch_size, seq_len, input_dim)
-        - Output: (batch_size, seq_len // 4, input_dim)
-
-    Example:
-        >>> reducer = ConvSequenceReducer(input_dim=128)
-        >>> x = torch.randn(32, 100, 128)  # (batch_size, seq_len, input_dim)
-        >>> out = reducer(x)
-        >>> print(out.shape)  # (32, 25, 128)
-    '''
-    def __init__(self, input_dim):
-        super(ConvSequenceReducer, self).__init__()
-        self.conv = nn.Conv1d(in_channels=input_dim, out_channels=input_dim, kernel_size=4, stride=4, groups=input_dim)
-
-    def forward(self, x):
-        x = x.permute(0, 2, 1)  # Change to (batch, channels, seq_len) for Conv1d
-        x = self.conv(x)         # Apply convolution
-        x = x.permute(0, 2, 1)   # Change back to (batch, seq_len, channels)
-        return x
-
-class ConvSequenceUpsampler(nn.Module):
-    '''
-    Convolutional Sequence Upsampler
-
-    This module increases the sequence length of an input tensor using a depthwise 1D transposed 
-    convolution. It expands the temporal dimension by a factor of 4 while preserving the number 
-    of features (channels). The transposed convolution is applied independently to each channel.
-
-    Args:
-        input_dim (int): The number of input features (channels).
-
-    Shape:
-        - Input: (batch_size, seq_len, input_dim)
-        - Output: (batch_size, seq_len * 4, input_dim)
-
-    Example:
-        >>> upsampler = ConvSequenceUpsampler(input_dim=128)
-        >>> x = torch.randn(32, 25, 128)  # (batch_size, seq_len, input_dim)
-        >>> out = upsampler(x)
-        >>> print(out.shape)  # (32, 100, 128)
-    '''
-
-    def __init__(self, input_dim):
-        super(ConvSequenceUpsampler, self).__init__()
-        self.deconv = nn.ConvTranspose1d(in_channels=input_dim, 
-                                         out_channels=input_dim, 
-                                         kernel_size=4, 
-                                         stride=4, 
-                                         groups=input_dim)  # Keeps channels independent
-
-    def forward(self, x):
-        x = x.permute(0, 2, 1)  # Change to (batch, channels, seq_len)
-        x = self.deconv(x)      # Apply transposed convolution
-        x = x.permute(0, 2, 1)  # Change back to (batch, seq_len, channels)
-        return x
-
-class CLSPooling(nn.Module):
-    '''
-    CLS Pooling
-
-    This module extracts the hidden state corresponding to the CLS token from a sequence of 
-    hidden states. The CLS token is the first token in the sequence, which is typically used 
-    as an aggregate representation of the entire sequence in BERT-like models.
-
-    Shape:
-        - Input: (batch_size, seq_len, hidden_dim)
-        - Output: (batch_size, hidden_dim)
-
-    Example:
-        >>> pooling = CLSPooling()
-        >>> x = torch.randn(32, 100, 768)  # (batch_size, seq_len, hidden_dim)
-        >>> out = pooling(x)
-        >>> print(out.shape)  # (32, 768)
-    '''
-
-    def __init__(self):
-        super(CLSPooling, self).__init__()
-
-    def forward(self, x, _):
-        return x[:, 0, :]  # Extract CLS token
-
-class CLSPoolingEOS(nn.Module):
-    '''
-    CLS Pooling
-
-    This module extracts the hidden state corresponding to the CLS token from a sequence of 
-    hidden states. The CLS token is the last token in the sequence, which is typically used 
-    as an aggregate representation of the entire sequence in BERT-like models.
-
-    Shape:
-        - Input: (batch_size, seq_len, hidden_dim)
-        - Output: (batch_size, hidden_dim)
-
-    Example:
-        >>> pooling = CLSPooling()
-        >>> x = torch.randn(32, 100, 768)  # (batch_size, seq_len, hidden_dim)
-        >>> out = pooling(x)
-        >>> print(out.shape)  # (32, 768)
-    '''
-
-    def __init__(self):
-        super(CLSPooling, self).__init__()
-
-    def forward(self, x, _):
-        return x[:, -1, :]  # Extract CLS token
-
 class DynamicCLSPooling(nn.Module):
     """
     Dynamic CLS Pooling
@@ -460,37 +342,12 @@ class SequenceClassifier(nn.Module):
         output = self.output(h)
         return output
 
-class HierarchicalModel(nn.Module):
-    def __init__(self, n, emb_dim, latent_len, num_classes, embedding, encoder):
-        super(HierarchicalModel, self).__init__()
-        self.emb_dim = emb_dim
-        self.latent_len = latent_len
-        self.embedding = embedding
-        self.encoder = encoder
-        self.seq2seq =  Mamba(
-                d_model=emb_dim,
-                d_state=16,
-                d_conv=4,
-                expand=2
-            ).to(device)
-        self.classifier = nn.Linear(n*latent_len*emb_dim, num_classes)
-
-    def forward(self, input):
-        batch_size = input.shape[0]
-        latent_logits = []
-        for batch_index in range(batch_size):
-            batch = input[batch_index]
-            embedded = self.embedding(batch)
-            latent_logits.append(self.encoder(embedded))
-        latent_logits = torch.stack(latent_logits)
-        latent_logits = latent_logits.reshape(batch_size, -1, self.emb_dim) # -1 is n*latent_len
-        latent_logits = self.seq2seq(latent_logits)
-        latent_logits = latent_logits.view(batch_size, -1)
-        return self.classifier(latent_logits)  # Classification output
-
-
 if __name__ == "__main__":
+    import numpy as np
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # CLS (Classify) token placed ad End Of Sequence
+    TokenIDEncoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259}, CLS_Placement="EOS")
 
     # --- Config ---
     vocab_size = 260
@@ -513,7 +370,7 @@ if __name__ == "__main__":
         latent_len=1,
         num_classes=num_classes,
         device=device,
-        Pooling=CLSPooling(),
+        Pooling=DynamicCLSPooling(258),
     )
 
     print("Building SequenceClassifier...")
@@ -526,9 +383,6 @@ if __name__ == "__main__":
         device=device,
         PacketEncoder=encoder,
     )
-
-    # CLS (Classify) token replaces Start Of Sequence  token
-    TokenIDEncoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259}, CLS_Placement="EOS")
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
@@ -565,4 +419,7 @@ if __name__ == "__main__":
     # --- Quick sanity checks ---
     assert logits.shape == (batch_size, num_classes), f"Unexpected shape: {logits.shape}"
     assert logits_ff.shape == (batch_size, num_classes), f"Unexpected shape: {logits_ff.shape}"
+    diff = (logits-logits_ff).sum().cpu().numpy()
+    assert diff == np.array(0., dtype="float32"), "Logits dont match up!"
+
     print("\nAll checks passed!")
