@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from mamba_ssm import Mamba
 from dataclasses import dataclass
-from DataUtils import ID_Encoder
+from RawByteMamba.SequenceClassifierComponents.DataUtils import ID_Encoder
 
 @dataclass
 class ModelParams:
