@@ -1,3 +1,5 @@
+use falkordb::FalkorSyncClient;
+use libc::connect;
 use pcap::{Capture, Device};
 // mod csv_handler;
 mod feature_parser;
@@ -24,49 +26,61 @@ use std::env;
 
 // Performance measurement
 use std::time::{Duration, Instant};
+// CLI interface
+use clap::Parser;
+use std::path::PathBuf;
+
+/// PCAP network traffic analyzer
+#[derive(Parser, Debug)]
+#[command(name = "pcap-analyzer", version, about)]
+struct Cli {
+    /// Path to the PCAP file to analyze
+    #[arg(short, long, default_value = "/home/plb41586/workspace/data/CICAPT-IIoT/Network_Traffic/Phase1/1stPhase-timed-Merged.pcap")]
+    file: PathBuf,
+
+    /// Cache packet payloads in memory during processing
+    #[arg(short, long, default_value_t = true)]
+    cache_payloads: bool,
+
+    /// FalkorDB graph name. If provided, results are written to FalkorDB.
+    /// If omitted, FalkorDB integration is disabled.
+    #[arg(short, long)]
+    graph_name: Option<String>,
+}
 
 fn main() {
-    // Parse command-line arguments
-    let args: Vec<String> = env::args().collect();
-    
-    let file_path = if args.len() > 1 {
-        // Use the provided file path from command line
-        &args[1]
-    } else {
-        // Use default file path if no argument provided
-        // "/workspace/data/Network_Traffic/Phase2/2ndPhase-timed-MergedV2.pcap"
-        "/workspace/data/Network_Traffic/Phase1/1stPhase-timed-Merged.pcap"
-        // "/workspace/data/Network_Traffic/filtered/Phase2--65_128to65_2.pcapng"
-    };
+    let cli = Cli::parse();
 
-    let cache_payloads: bool = if args.len() > 2 {
-        args[2].to_lowercase() == "true"
-    } else {
-        false
-    };
+    let use_falkor = cli.graph_name.is_some();
+    let graph_name = cli.graph_name.as_deref().unwrap_or("");
 
-    let graph_name: &str = if args.len() > 3 {
-        &args[3]
-    }else {
-       "Phase2"
-    };
-    
-    println!("Caching payloads to Redis Queue: {}", cache_payloads);
-
-    println!("Using file: {}", file_path);
+    println!("File:           {}", cli.file.display());
+    println!("Cache payloads: {}", cli.cache_payloads);
+    println!("Use FalkorDB:   {}", use_falkor);
+    if use_falkor {
+        println!("Graph name:     {}", graph_name);
+    }
 
     // Setup connection to redis server
-    let mut conn = connect_to_redis();
-    println!("Connected to Redis");
-    println!("Connecting to Falkor");
-    let FalkorClient = falkor_integration::connect_to_falkor();
-    // let mut FalkorGraph = FalkorClient.select_graph("IDS_Node_1");
-    let mut graph = FalkorClient.select_graph(graph_name);
-    load_network_topology(&mut graph, "/workspace/data/Network_Traffic/Devices.toml")
-        .expect("Failed to load network topology");
-    println!("Loaded network topology into FalkorDB");
-    // Setup capture from file or network interface
-    let mut cap = setup_capture_from_file(file_path);
+    let mut redis_conn: Option<redis::Connection> = if cli.cache_payloads {
+        Some(connect_to_redis())
+    } else {
+        None
+    };
+    // Setup connection to FalkorDB
+    let FalkorClient: Option<FalkorSyncClient> = if use_falkor {
+        Some(falkor_integration::connect_to_falkor())
+    } else {
+        None
+    };
+    if let Some(client) = &FalkorClient {
+        let mut graph = client.select_graph(graph_name);
+        load_network_topology(&mut graph, "/workspace/data/Network_Traffic/Devices.toml")
+            .expect("Failed to load network topology");
+        println!("Loaded network topology into FalkorDB");
+        // Setup capture from file or network interface
+    }
+    let mut cap = setup_capture_from_file(&cli.file);
     
     // Capture and parse packets
     // Push features to FalkorDB to construct Communication Graph
@@ -84,12 +98,10 @@ fn main() {
                 let _is_new_flow = tracker.process_packet(&key, parsed_packet.payload_set.data.len() as u16, parsed_packet.timevalue);
                 let normalized_key = key.normalize();
                 let stats = tracker.get_flow_stats(&normalized_key).unwrap();
-                
-                if cache_payloads {
-                    // Push PayloadSet Redis Queue for further analysis in Python
+                if let Some(conn) = &mut redis_conn {
                     let flow_identifier = key.to_string();
                     let payloadset = parsed_packet.payload_set.clone();
-                    redis_integration::push_payloadset_to_redis_queue(&mut conn, &flow_identifier, &payloadset);
+                    redis_integration::push_payloadset_to_redis_queue(conn, &flow_identifier, &payloadset);
                 }
             }
             Err(e) => {
@@ -99,18 +111,19 @@ fn main() {
             }
         }
         pak_num = pak_num + 1;
-        // if pak_num == 10000 {
-        //     println!("Handled 1000 packets, exiting for testing purposes");
-        //     break;
-        // }
+        if pak_num == 10000 {
+            println!("Handled 1000 packets, exiting for testing purposes");
+            break;
+        }
     }
     
     println!("Estimated memory usage: {} bytes", tracker.estimated_memory_usage());
-    // tracker.print_flows();
-    println!("Pushing flows to FalkorDB");
-    let now = Instant::now();
-    tracker.push_flows_to_falkor(graph_name);
-    println!("Pushed all flows to FalkorDB in {:?}", now.elapsed());
+    if let Some(client) = &FalkorClient {
+        println!("Pushing flows to FalkorDB");
+        let now = Instant::now();
+        tracker.push_flows_to_falkor(graph_name, &client);
+        println!("Pushed all flows to FalkorDB in {:?}", now.elapsed());
+    }
     println!("Finished capturing packets with {} issues", issues);
     println!("Finished capturing packets: {:?}", pak_num);
     println!("Exiting");

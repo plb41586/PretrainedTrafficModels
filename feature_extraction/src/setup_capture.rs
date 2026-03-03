@@ -1,10 +1,11 @@
+use std::path::PathBuf;
 use pcap::{Capture, Device};
 
-pub fn setup_capture_from_file(file_name: &str) -> Capture<pcap::Offline> {
+pub fn setup_capture_from_file(file_name: &PathBuf) -> Capture<pcap::Offline> {
     // Setup Capture from File
     let cap = Capture::from_file(file_name).expect("Failed to open pcap file");
     println!("Capture from Pcap file started!");
-    println!("Using file {}", file_name);
+    println!("Using file {}", file_name.display());
     cap
 }
 

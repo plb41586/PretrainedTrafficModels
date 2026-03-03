@@ -3,7 +3,7 @@ use serde::de;
 use crate::feature_parser::{PayloadSet};
 
 pub fn connect_to_redis() -> redis::Connection {
-    let client = redis::Client::open("redis://falkordb:6379")
+    let client = redis::Client::open("redis://redis:6379")
     .expect("Failed to create Redis client");
     
     client

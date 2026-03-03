@@ -147,7 +147,6 @@ impl FlowStats {
 pub struct FlowTracker {
     flows: FxHashMap<FlowKey, FlowStats>,
     flow_timeout: Duration,
-    falkor_client: FalkorSyncClient,
     seen_ips: FxHashSet<IpAddr>,
 }
 
@@ -157,7 +156,6 @@ impl FlowTracker {
         Self {
             flows: FxHashMap::with_capacity_and_hasher(initial_capacity, Default::default()),
             flow_timeout: Duration::from_secs(flow_timeout_seconds),
-            falkor_client: falkor_integration::connect_to_falkor(),
             seen_ips: FxHashSet::with_capacity_and_hasher(10_000, Default::default()),
         }
     }
@@ -238,8 +236,8 @@ impl FlowTracker {
         self.seen_ips.len()
     }
 
-    pub fn push_flows_to_falkor(&self, graph_name: &str) {
-        let mut graph = self.falkor_client.select_graph(graph_name);
+    pub fn push_flows_to_falkor(&self, graph_name: &str, falkor_client: &FalkorSyncClient) {
+        let mut graph = falkor_client.select_graph(graph_name);
         for ip in self.seen_ips.iter() {
             let _ = falkor_integration::merge_ip_address(&mut graph, ip);
         }
