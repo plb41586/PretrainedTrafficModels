@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from mamba_ssm import Mamba
 from dataclasses import dataclass
-from RawByteMamba.SequenceClassifierComponents.DataUtils import ID_Encoder
+from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder
 import math
 
 @dataclass
@@ -367,6 +367,131 @@ class Packet_Encoder(nn.Module):
         h = self.BackBone(h)
         h = self.Pooler(h, tokens)
         return h
+
+
+class AutoregressiveDecoder(nn.Module):
+    """Autoregressive decoder that reconstructs a token sequence from a CLS embedding.
+
+    The CLS embedding is prepended as the first token in the decoder input,
+    acting as a bottleneck representation. During training, teacher forcing
+    is used by shifting the ground truth tokens and prepending the CLS
+    embedding. During inference, tokens are generated one at a time.
+
+    Args:
+        vocab_size:     Size of the token vocabulary.
+        embedding_dim:  Dimensionality of token embeddings (must match the
+                        CLS embedding and backbone ``d_model``).
+        max_len:        Maximum sequence length for generation.
+        Backbone:       Sequence modeling backbone (any ``nn.Module`` mapping
+                        ``(batch, seq_len, embedding_dim)`` →
+                        ``(batch, seq_len, embedding_dim)``). Should support
+                        causal masking if using a Transformer backbone.
+        bos_token_id:   Beginning-of-sequence token id used to seed
+                        autoregressive inference.
+        device:         Device to place all sub-modules on.
+    """
+
+    def __init__(self, vocab_size: int, embedding_dim: int, max_len: int,
+                 Backbone: nn.Module, bos_token_id: int, device: torch.device):
+        super().__init__()
+        self.max_len = max_len
+        self.bos_token_id = bos_token_id
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.cls_proj = nn.Linear(embedding_dim, embedding_dim)
+        self.Backbone = Backbone
+        self.output_head = nn.Linear(embedding_dim, vocab_size, bias=False)
+        self.to(device)
+
+    def _build_decoder_input(self, cls_embedding: torch.Tensor, tokens: torch.Tensor = None) -> torch.Tensor:
+        """Prepend the projected CLS embedding to the token embeddings.
+
+        Args:
+            cls_embedding: CLS vector of shape ``(batch, embedding_dim)``.
+            tokens:        Optional token indices of shape ``(batch, seq_len)``.
+                           If ``None``, only the CLS embedding is returned.
+
+        Returns:
+            Decoder input of shape ``(batch, 1 + seq_len, embedding_dim)``
+            or ``(batch, 1, embedding_dim)`` if tokens are not provided.
+        """
+        cls_token = self.cls_proj(cls_embedding).unsqueeze(1)  # (batch, 1, embedding_dim)
+        if tokens is None:
+            return cls_token
+        token_embeds = self.embedding(tokens)  # (batch, seq_len, embedding_dim)
+        return torch.cat([cls_token, token_embeds], dim=1)
+
+    def forward(self, cls_embedding: torch.Tensor, target_tokens: torch.Tensor) -> torch.Tensor:
+        """Training forward pass with teacher forcing.
+
+        The input to the decoder is ``[CLS_proj | target_tokens[:-1]]``,
+        i.e. the CLS embedding followed by all target tokens except the
+        last. The model predicts each next token, producing logits aligned
+        with ``target_tokens``.
+
+        Args:
+            cls_embedding:  CLS vector of shape ``(batch, embedding_dim)``.
+            target_tokens:  Ground truth token indices of shape
+                            ``(batch, seq_len)`` used for teacher forcing.
+
+        Returns:
+            Logits of shape ``(batch, seq_len, vocab_size)`` aligned with
+            ``target_tokens`` (i.e. logits[i] predicts target_tokens[i]).
+        """
+        # Shift right: drop last target token so output length matches target
+        shifted = target_tokens[:, :-1]  # (batch, seq_len - 1)
+        h = self._build_decoder_input(cls_embedding, shifted)  # (batch, 1 + seq_len - 1, dim)
+        h = self.Backbone(h)
+        logits = self.output_head(h)  # (batch, seq_len, vocab_size)
+        return logits
+
+    @torch.no_grad()
+    def generate(self, cls_embedding: torch.Tensor, max_len: int = None,
+                 temperature: float = 1.0, eos_token_id: int = None) -> torch.Tensor:
+        """Autoregressively generate a token sequence from a CLS embedding.
+
+        Args:
+            cls_embedding:  CLS vector of shape ``(batch, embedding_dim)``.
+            max_len:        Maximum number of tokens to generate. Defaults
+                            to ``self.max_len``.
+            temperature:    Sampling temperature. Values < 1 sharpen the
+                            distribution, > 1 flatten it. Use 0 for greedy.
+            eos_token_id:   Optional end-of-sequence token id. Generation
+                            stops early for a sample once this token is
+                            produced.
+
+        Returns:
+            Generated token indices of shape ``(batch, generated_len)``.
+        """
+        max_len = max_len or self.max_len
+        batch_size = cls_embedding.size(0)
+        device = cls_embedding.device
+
+        generated = torch.full((batch_size, 1), self.bos_token_id, dtype=torch.long, device=device)
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        for _ in range(max_len - 1):
+            h = self._build_decoder_input(cls_embedding, generated)
+            h = self.Backbone(h)
+            next_logits = h[:, -1, :]  # (batch, embedding_dim)
+            next_logits = self.output_head(next_logits)  # (batch, vocab_size)
+
+            if temperature == 0:
+                next_token = next_logits.argmax(dim=-1)
+            else:
+                probs = torch.softmax(next_logits / temperature, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+            # Don't update already finished sequences
+            next_token = next_token.masked_fill(finished, self.bos_token_id)
+            generated = torch.cat([generated, next_token.unsqueeze(1)], dim=1)
+
+            if eos_token_id is not None:
+                finished = finished | (next_token == eos_token_id)
+                if finished.all():
+                    break
+
+        return generated
+
 
 class SequenceClassifier(nn.Module):
     def __init__(self, 

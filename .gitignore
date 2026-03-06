@@ -59,6 +59,7 @@ MANIFEST
 *.pkl
 *.graphml
 data/*
+data_artefacts/*
 
 
 # Models
