@@ -1,5 +1,5 @@
-from RawByteMamba.SequenceClassifierComponents.ModelDefinitions import  ModelParams, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone
-from RawByteMamba.SequenceClassifierComponents.DataUtils import ID_Encoder, PreTrainingDatasetHandler
+from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  ModelParams, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone
+from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder, PreTrainingDatasetHandler
 import polars as pl
 import torch
 from keras_hub.layers import MaskedLMMaskGenerator
@@ -14,7 +14,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('RawByteMamba/PreTraining/PacketLevelMLM.log'),
+        logging.FileHandler('RawByteTrafficModelling/PreTraining/PacketLevelMLM.log'),
         logging.StreamHandler()
     ]
 )
