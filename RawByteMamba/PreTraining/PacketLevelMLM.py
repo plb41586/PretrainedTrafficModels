@@ -30,7 +30,9 @@ seq_lvl_dim = 32
 bytes_per_packet = 1520       # token length per packet
 packets_per_sequence = 64     # max packets per sequence
 num_classes = 14
-batch_size = 256
+batch_size = 128
+
+learning_rate = 8e-4
 
 alpha_proto = 4
 alpha_reconstruction = 1
@@ -50,21 +52,21 @@ ProtoHierarchyEncodings = ProtoHierarchyEncoder.fit_transform(DataHandler.data["
 device = torch.device("cuda")
 assert device == torch.device("cuda")
 
-# TransformerBackbone = TransformerBackbone(d_model=emb_dim, nhead=4, num_layers=2, max_len=1520).to(device)
-MambaBackbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
+# Backbone = TransformerBackbone(d_model=emb_dim, nhead=4, num_layers=2, max_len=1520).to(device)
+Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
 
 
 MaskedLanguageModel = Packet_MLM(vocab_size=vocab_size, 
                                 embedding_dim=emb_dim, 
                                 num_CLS_classes=ProtoHierarchyEncodings.shape[1],
                                 CLS_Pooling = DynamicCLSPooling(DataHandler.InputIDEncoder.SpecialIDs["<CLS>"]),
-                                Backbone=MambaBackbone,
+                                Backbone=Backbone,
                                 device=device)
 
 
 loss_fct = nn.CrossEntropyLoss()
 
-optimizer = torch.optim.AdamW(MaskedLanguageModel.parameters(), lr=8e-4, weight_decay=1e-2)
+optimizer = torch.optim.AdamW(MaskedLanguageModel.parameters(), lr=learning_rate, weight_decay=1e-2)
 
 unselectable_token_ids = [DataHandler.InputIDEncoder.SpecialIDs["</s>"], 
                         DataHandler.InputIDEncoder.SpecialIDs["<pad>"],
@@ -75,14 +77,14 @@ unselectable_token_ids = [DataHandler.InputIDEncoder.SpecialIDs["</s>"],
 Masker = MaskedLMMaskGenerator( vocabulary_size = ModelParams.vocab_size, 
                                 mask_token_id = DataHandler.InputIDEncoder.SpecialIDs["<mask>"], 
                                 mask_selection_length=ModelParams.packet_id_len*0.25, 
-                                mask_selection_rate=0.25,
+                                mask_selection_rate=0.10,
                                 mask_token_rate=0.9,
                                 random_token_rate=0.1,
                                 unselectable_token_ids=unselectable_token_ids)
 
 for i in range(Epochs):
-    batches = DataHandler.sample_epoch_packet_indices(batch_size)
 
+    batches = DataHandler.sample_epoch_packet_indices(batch_size)
     for index, batch in enumerate(batches):
         bytes, proto_hierarchy = DataHandler.get_pretraining_data(batch)
         input_ids = DataHandler.InputIDEncoder.construct_input_ids(bytes)
@@ -124,3 +126,11 @@ for i in range(Epochs):
         logger.info(f"Total Loss: {loss.item()}")
         logger.info(f"Reconstruction Loss: {reconstruction_loss} Reconstruction Accuracy: {reconstruction_accuracy}")
         logger.info(f"ProtoHierarchy Loss: {proto_hierarchyloss} ProtoHierarchy Accuracy: {CLS_accuracy}")
+
+        if reconstruction_accuracy > 0.45 and CLS_accuracy > 0.80 and batch_size < 2048:
+            logger.info("Increasing Batch Size")
+            batch_size = 2048
+            learning_rate = learning_rate * 10
+            optimizer.param_groups[0]['lr'] = learning_rate
+            break
+            

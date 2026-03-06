@@ -80,6 +80,20 @@ class DynamicCLSPooling(nn.Module):
         return cls_embeddings
 
 class MambaBackbone(nn.Module):
+    """Stacked Mamba (S4/SSM) backbone for sequence modeling.
+
+    Applies multiple Mamba layers with residual connections and layer
+    normalization.
+
+    Args:
+        d_model:    Dimensionality of the input and output embeddings.
+        num_layers: Number of stacked Mamba layers.
+        d_state:    State dimensionality of the structured state space model.
+        d_conv:     Kernel size of the local convolution in each Mamba block.
+        expand:     Expansion factor for the inner projection dimension.
+        dropout:    Dropout probability applied before and after the layer stack.
+    """
+
     def __init__(self, d_model: int, num_layers: int, d_state: int = 16, d_conv: int = 4, expand: int = 2, dropout: float = 0.1):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
@@ -97,17 +111,42 @@ class MambaBackbone(nn.Module):
             for _ in range(num_layers)
         ])
 
-    def forward(self, x):
-        h = x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the input through all Mamba layers.
+
+        Args:
+            x: Input tensor of shape ``(batch, seq_len, d_model)``.
+
+        Returns:
+            Output tensor of the same shape after applying all Mamba
+            layers with residual connections, layer normalization, and
+            dropout.
+        """
+        h = self.dropout(x)
         for mamba, norm in zip(self.layers, self.norms):
-            h = norm(mamba(h) + h)  # residual + post-norm
+            h = norm(mamba(h) + h)
         h = self.dropout(h)
         return h
 
+
 class TransformerBackbone(nn.Module):
+    """Standard Transformer encoder backbone with sinusoidal positional encoding.
+
+    Wraps ``nn.TransformerEncoder`` with fixed sinusoidal position embeddings
+    and configurable depth/dropout.
+
+    Args:
+        d_model:    Dimensionality of the input and output embeddings.
+        nhead:      Number of attention heads per layer.
+        num_layers: Number of stacked TransformerEncoderLayers.
+        max_len:    Maximum supported sequence length for positional encoding.
+        dropout:    Dropout probability applied to positional embeddings and
+                    within each transformer layer.
+    """
+
     def __init__(self, d_model: int, nhead: int, num_layers: int, max_len: int, dropout: float = 0.1):
         super().__init__()
-        self.pos_encoding = self._sinusoidal_encoding(max_len, d_model)
+        self._init_sinusoidal_encoding(max_len, d_model)
         self.dropout = nn.Dropout(p=dropout)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -120,54 +159,107 @@ class TransformerBackbone(nn.Module):
             num_layers=num_layers,
         )
 
-    def _sinusoidal_encoding(self, max_len, d_model):
+    def _init_sinusoidal_encoding(self, max_len: int, d_model: int) -> None:
+        """Generate and register fixed sinusoidal positional encodings.
+
+        Args:
+            max_len: Maximum sequence length.
+            d_model: Embedding dimensionality.
+        """
         pe = torch.zeros(max_len, d_model)
         pos = torch.arange(0, max_len).unsqueeze(1).float()
         div = torch.exp(torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(pos * div)
         pe[:, 1::2] = torch.cos(pos * div)
-        return nn.Parameter(pe.unsqueeze(0), requires_grad=False)
+        self.register_buffer('pos_encoding', pe.unsqueeze(0))
 
-    def forward(self, x, mask=None):
+    @staticmethod
+    def generate_causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
+        """Generate an upper-triangular causal attention mask.
+
+        Args:
+            seq_len: Length of the sequence.
+            device:  Device to create the mask on.
+
+        Returns:
+            A ``(seq_len, seq_len)`` mask with ``-inf`` above the diagonal
+            and ``0`` on and below, suitable for ``nn.TransformerEncoder``.
+        """
+        return torch.triu(torch.full((seq_len, seq_len), float('-inf'), device=device), diagonal=1)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None, causal: bool = False) -> torch.Tensor:
+        """Run the input through positional encoding and all transformer layers.
+
+        Args:
+            x:      Input tensor of shape ``(batch, seq_len, d_model)``.
+            mask:   Optional attention mask passed to the transformer encoder.
+                    Takes precedence over ``causal`` if provided.
+            causal: If ``True`` and ``mask`` is ``None``, automatically
+                    generates a causal (upper-triangular) attention mask.
+
+        Returns:
+            Output tensor of the same shape.
+        """
         h = self.dropout(x + self.pos_encoding[:, :x.size(1), :])
+        if mask is None and causal:
+            mask = self.generate_causal_mask(x.size(1), x.device)
         h = self.transformer_encoder(h, mask=mask)
+        h = self.dropout(h)
         return h
 
-class Packet_MLM(nn.Module):
-    def __init__(   self, 
-                    vocab_size: int, 
-                    embedding_dim: int,  
-                    num_CLS_classes: int,
-                    CLS_Pooling: nn.Module,
-                    Backbone: nn.Module, 
-                    device: torch.device):
-        super().__init__()
-        self.device = device
-        
-        self.embedding = nn.Embedding(vocab_size, embedding_dim).to(device)
-        
-        self.Backbone = Backbone.to(device)
-        
-        self.reconstruction_output = nn.Linear(embedding_dim, vocab_size, bias=False).to(device)
-        self.CLS_Pooling = CLS_Pooling.to(device)
-        self.CLS_output = nn.Linear(embedding_dim, num_CLS_classes, bias=False).to(device)
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the model. Returns the raw logits.
-        
+class Packet_MLM(nn.Module):
+    """Dual-head model for Masked Language Modeling and sequence classification.
+
+    Combines a token embedding layer, a swappable sequence backbone (e.g.
+    ``TransformerBackbone`` or ``MambaBackbone``), and two output heads:
+    one for per-token reconstruction (MLM) and one for sequence-level
+    classification (CLS).
+
+    Args:
+        vocab_size:       Size of the token vocabulary.
+        embedding_dim:    Dimensionality of token embeddings (must match
+                          the backbone's ``d_model``).
+        num_CLS_classes:  Number of target classes for the classification head.
+        CLS_Pooling:      Module that reduces the backbone's per-token output
+                          to a single sequence-level vector. Receives
+                          ``(hidden_states, tokens)`` and returns a tensor
+                          of shape ``(batch, embedding_dim)``.
+        Backbone:         Sequence modeling backbone (any ``nn.Module`` mapping
+                          ``(batch, seq_len, embedding_dim)`` →
+                          ``(batch, seq_len, embedding_dim)``).
+        device:           Device to place all sub-modules on.
+    """
+
+    def __init__(self, vocab_size: int, embedding_dim: int, num_CLS_classes: int,
+                 CLS_Pooling: nn.Module, Backbone: nn.Module, device: torch.device):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.Backbone = Backbone
+        self.reconstruction_output = nn.Linear(embedding_dim, vocab_size, bias=False)
+        self.CLS_Pooling = CLS_Pooling
+        self.CLS_output = nn.Linear(embedding_dim, num_CLS_classes, bias=False)
+        self.to(device)
+
+    def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass producing both reconstruction and classification logits.
+
         Args:
-            tokens (torch.Tensor): The input tokens.
-        
+            tokens: Integer token indices of shape ``(batch, seq_len)``.
+
         Returns:
-            torch.Tensor: The raw logits.
+            A tuple of:
+                - **reconstruction_output**: Per-token logits over the
+                  vocabulary, shape ``(batch, seq_len, vocab_size)``.
+                - **CLS_output**: Classification logits, shape
+                  ``(batch, num_CLS_classes)``.
         """
         h = self.embedding(tokens)
         h = self.Backbone(h)
         reconstruction_output = self.reconstruction_output(h)
         CLS = self.CLS_Pooling(h, tokens)
         CLS_output = self.CLS_output(CLS)
-        return reconstruction_output, CLS_output   
+        return reconstruction_output, CLS_output
 
 class Packet_Classifier(nn.Module):
     def __init__(   self, 
