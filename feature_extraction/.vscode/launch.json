@@ -43,5 +43,12 @@
             "args": [],
             "cwd": "${workspaceFolder}"
         }
-    ]
+    ],
+    "setupCommands": [
+    {
+    "description": "Disable target async",
+    "text": "set target-async off",
+    "ignoreFailures": true
+    }
+]
 }

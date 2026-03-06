@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 // CLI interface
 use clap::Parser;
 use std::path::PathBuf;
+use polars::prelude::*;
 
 /// PCAP network traffic analyzer
 #[derive(Parser, Debug)]
@@ -39,13 +40,19 @@ struct Cli {
     file: PathBuf,
 
     /// Cache packet payloads in memory during processing
-    #[arg(short, long, default_value_t = true)]
+    #[arg(short, long, default_value_t = false)]
     cache_payloads: bool,
 
     /// FalkorDB graph name. If provided, results are written to FalkorDB.
     /// If omitted, FalkorDB integration is disabled.
     #[arg(short, long)]
     graph_name: Option<String>,
+
+    /// Polars output path
+    /// If omitted no Polars Dataframe is created
+    
+    #[arg(short, long, default_value = "/home/plb41586/workspace/data_artefacts/CICAPT_Phase1.parquet")]
+    pl_outfile: Option<PathBuf>
 }
 
 fn main() {
@@ -80,6 +87,8 @@ fn main() {
         println!("Loaded network topology into FalkorDB");
         // Setup capture from file or network interface
     }
+    let save_to_pl = cli.pl_outfile.is_some();
+    let mut parsed_packets: Vec<ParsedPacketSet> = Vec::new();
     let mut cap = setup_capture_from_file(&cli.file);
     
     // Capture and parse packets
@@ -93,8 +102,9 @@ fn main() {
     
     while let Ok(packet) = cap.next_packet() {
         match parse_packet(&packet) {
-            Ok(parsed_packet) => {
+            Ok(mut parsed_packet) => {
                 let key: FlowKey = FlowKey::from_parsed_packet(&parsed_packet).unwrap();
+                parsed_packet.flow_key = key.to_string();
                 let _is_new_flow = tracker.process_packet(&key, parsed_packet.payload_set.data.len() as u16, parsed_packet.timevalue);
                 let normalized_key = key.normalize();
                 let stats = tracker.get_flow_stats(&normalized_key).unwrap();
@@ -102,6 +112,9 @@ fn main() {
                     let flow_identifier = key.to_string();
                     let payloadset = parsed_packet.payload_set.clone();
                     redis_integration::push_payloadset_to_redis_queue(conn, &flow_identifier, &payloadset);
+                }
+                if save_to_pl {
+                    parsed_packets.push(parsed_packet);
                 }
             }
             Err(e) => {
@@ -111,18 +124,59 @@ fn main() {
             }
         }
         pak_num = pak_num + 1;
-        if pak_num == 10000 {
-            println!("Handled 1000 packets, exiting for testing purposes");
-            break;
-        }
+        // if pak_num == 10000 {
+        //     println!("Handled 1000 packets, exiting for testing purposes");
+        //     break;
+        // }
     }
     
     println!("Estimated memory usage: {} bytes", tracker.estimated_memory_usage());
+    /// Send to FalkorDB if enabled
     if let Some(client) = &FalkorClient {
         println!("Pushing flows to FalkorDB");
         let now = Instant::now();
         tracker.push_flows_to_falkor(graph_name, &client);
         println!("Pushed all flows to FalkorDB in {:?}", now.elapsed());
+    }
+    /// Save to Polars DataFrame if enabled
+    if let Some(outfile) = cli.pl_outfile {
+        println!("Saving parsed packets to Polars DataFrame at {}", outfile.display());
+        /// Create Vectors for rows of the DataFrame
+        let mut proto_hierarchys: Vec<String> = Vec::new();
+        let mut flow_keys: Vec<String> = Vec::new();
+        let mut timestamps_s: Vec<i64> = Vec::new();
+        let mut timestamps_us: Vec<i64> = Vec::new();
+        let mut data: Vec<Vec<u8>> = Vec::new();
+        let mut mask: Vec<Vec<u8>> = Vec::new();
+        let mut header_lens: Vec<u32> = Vec::new();
+        for packet in &parsed_packets {
+            proto_hierarchys.push(packet.payload_set.proto_hierarchy.clone());
+            flow_keys.push(packet.flow_key.clone());
+            timestamps_s.push(packet.timevalue.seconds);
+            timestamps_us.push(packet.timevalue.microseconds);
+            data.push(packet.payload_set.data.clone());
+            mask.push(
+                packet
+                    .payload_set
+                    .mask
+                    .iter()
+                    .map(|&b| if b { 1u8 } else { 0u8 })
+                    .collect(),
+            );
+            header_lens.push(packet.payload_set.header_len);
+        }
+        let mut df = df! [
+            "proto_hierarchy" => &proto_hierarchys,
+            "flow_key" => &flow_keys,
+            "timestamp_s" => &timestamps_s,
+            "timestamp_us" => &timestamps_us,
+            "data" => &data,
+            "mask" => &mask,
+            "header_len" => &header_lens
+        ].expect("Failed to create DataFrame");
+        let mut file = std::fs::File::create(&outfile).expect("Could not create output file");
+        ParquetWriter::new(&mut file).finish(&mut df).expect("Failed to write DataFrame to Parquet file");
+        println!("Saved parsed packets to Polars DataFrame");
     }
     println!("Finished capturing packets with {} issues", issues);
     println!("Finished capturing packets: {:?}", pak_num);

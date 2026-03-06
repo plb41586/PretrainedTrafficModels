@@ -1277,7 +1277,6 @@ impl ProtocolFeatureSet {
 pub struct TimeStamp {
     /// Seconds since Unix epoch (January 1, 1970)
     pub seconds: i64,
-    // Seconds since Unix epoch (January 1, 1970) 
     pub microseconds: i64,
 }
 
@@ -1392,6 +1391,7 @@ pub struct ParsedPacketSet {
     pub timevalue: TimeStamp, 
     pub features: ProtocolFeatureSet,
     pub payload_set: PayloadSet,
+    pub flow_key: String,
 }
 
 impl ParsedPacketSet {
@@ -1400,6 +1400,7 @@ impl ParsedPacketSet {
             timevalue: TimeStamp::new(timevalue.tv_sec, timevalue.tv_usec),
             features: ProtocolFeatureSet::new(),
             payload_set: PayloadSet::new(data),
+            flow_key: String::new(),
         }
     }
 }
