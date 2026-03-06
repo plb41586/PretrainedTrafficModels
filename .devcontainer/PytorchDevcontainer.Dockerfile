@@ -59,6 +59,8 @@ RUN /home/$USERNAME/app/venv/bin/pip install notebook
 RUN /home/$USERNAME/app/venv/bin/pip install ipykernel
 RUN /home/$USERNAME/app/venv/bin/pip install causal-conv1d
 RUN /home/$USERNAME/app/venv/bin/pip install mamba-ssm[dev]
+RUN /home/$USERNAME/app/venv/bin/pip install keras-nlp
+RUN /home/$USERNAME/app/venv/bin/pip install scikit-learn
 
 USER $USERNAME
 ENV PATH=/home/$USERNAME/app/venv/bin:$PATH

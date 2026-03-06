@@ -20,7 +20,8 @@
         "vadimcn.vscode-lldb",
         "webfreak.debug",
         "ms-toolsai.jupyter",
-        "ms-toolsai.datawrangler"
+        "ms-toolsai.datawrangler",
+        "Redis.redis-for-vscode"
       ]
     }
   }
