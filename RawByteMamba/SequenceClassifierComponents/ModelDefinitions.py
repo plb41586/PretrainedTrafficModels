@@ -3,13 +3,14 @@ import torch.nn as nn
 from mamba_ssm import Mamba
 from dataclasses import dataclass
 from RawByteMamba.SequenceClassifierComponents.DataUtils import ID_Encoder
+import math
 
 @dataclass
 class ModelParams:
     """
     MLM Model Parameters
     """
-    vocab_size: int = 260
+    vocab_size: int = 261
     dim: int = 64
     packet_id_len: int = 1520
     pooling_type: str = "DynamicCLS"
@@ -78,26 +79,74 @@ class DynamicCLSPooling(nn.Module):
 
         return cls_embeddings
 
+class MambaBackbone(nn.Module):
+    def __init__(self, d_model: int, num_layers: int, d_state: int = 16, d_conv: int = 4, expand: int = 2, dropout: float = 0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.layers = nn.ModuleList([
+            Mamba(
+                d_model=d_model,
+                d_state=d_state,
+                d_conv=d_conv,
+                expand=expand,
+            )
+            for _ in range(num_layers)
+        ])
+        self.norms = nn.ModuleList([
+            nn.LayerNorm(d_model)
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, x):
+        h = x
+        for mamba, norm in zip(self.layers, self.norms):
+            h = norm(mamba(h) + h)  # residual + post-norm
+        h = self.dropout(h)
+        return h
+
+class TransformerBackbone(nn.Module):
+    def __init__(self, d_model: int, nhead: int, num_layers: int, max_len: int, dropout: float = 0.1):
+        super().__init__()
+        self.pos_encoding = self._sinusoidal_encoding(max_len, d_model)
+        self.dropout = nn.Dropout(p=dropout)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers,
+        )
+
+    def _sinusoidal_encoding(self, max_len, d_model):
+        pe = torch.zeros(max_len, d_model)
+        pos = torch.arange(0, max_len).unsqueeze(1).float()
+        div = torch.exp(torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        return nn.Parameter(pe.unsqueeze(0), requires_grad=False)
+
+    def forward(self, x, mask=None):
+        h = self.dropout(x + self.pos_encoding[:, :x.size(1), :])
+        h = self.transformer_encoder(h, mask=mask)
+        return h
 
 class Packet_MLM(nn.Module):
     def __init__(   self, 
                     vocab_size: int, 
                     embedding_dim: int,  
                     num_CLS_classes: int,
-                    CLS_Pooling: nn.Module, 
+                    CLS_Pooling: nn.Module,
+                    Backbone: nn.Module, 
                     device: torch.device):
         super().__init__()
         self.device = device
         
         self.embedding = nn.Embedding(vocab_size, embedding_dim).to(device)
         
-        self.BackBone = Mamba(
-                d_model=embedding_dim,
-                d_state=16,
-                d_conv=4,
-                expand=2
-            ).to(device)
-        
+        self.Backbone = Backbone.to(device)
         
         self.reconstruction_output = nn.Linear(embedding_dim, vocab_size, bias=False).to(device)
         self.CLS_Pooling = CLS_Pooling.to(device)
@@ -114,7 +163,7 @@ class Packet_MLM(nn.Module):
             torch.Tensor: The raw logits.
         """
         h = self.embedding(tokens)
-        h = self.BackBone(h)
+        h = self.Backbone(h)
         reconstruction_output = self.reconstruction_output(h)
         CLS = self.CLS_Pooling(h, tokens)
         CLS_output = self.CLS_output(CLS)
@@ -183,7 +232,6 @@ class Packet_Encoder(nn.Module):
                     input_len: int,
                     latent_dim: int,
                     latent_len: int,  
-                    num_classes: int,
                     device: torch.device,
                     embedding: nn.Module = None,
                     BackBone: nn.Module = None,

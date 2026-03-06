@@ -560,6 +560,145 @@ class ValidationDatasetHandler():
                 Flow_Df = Attack_Df.filter(pl.col("FlowID") == Flow)
                 self.FlowDf2Seq(Flow_Df, self.seq_len)
 
+
+class PreTrainingDatasetHandler():
+    def __init__(self, data: pl.DataFrame, seq_len: int, encoder: ID_Encoder):
+        self.data = data
+        self.seq_len = seq_len # Number of packets in a sequence
+        self.InputIDEncoder = encoder
+
+    def get_packet_sequence_from_df(self, df: pl.DataFrame, seq_len: int):
+        """
+        Get a sequence of packets from the given DataFrame.
+        Start index is randomly selected in the range [0, len(df) - seq_len].
+        
+        Args:
+            df (pl.DataFrame): The DataFrame containing the packet data.
+            seq_len (int): The sequence length.
+        
+        Returns:
+            pl.Dataframe: The packet sequence.
+        """
+        # Check if DataFrame has enough rows for the sequence length
+        if len(df) < seq_len:
+            # Extract the sequence unpadded sequence
+            packet_sequence = df
+
+        else:
+            length = seq_len
+            # Generate random start index
+            max_start_idx = len(df) - length
+            start_idx = np.random.randint(0, max_start_idx + 1)
+            # Extract the sequence
+            packet_sequence = df.slice(start_idx, length)
+        
+        return packet_sequence
+
+    def sample_epoch_packet_indices(self, batch_size: int):
+        """
+        Sample batches of packets from the training data randomly.
+        Returns batches of indices to draw from training data to complete one epoch.
+        Batches affected by class imbalance.
+        input:
+            batch_size: The batch size.
+        output:
+            batch_data: A list of batch indices in numpy array format intended to draw from training data.
+        """
+        # Get total number of samples
+        num_samples = self.data.height
+        
+        # Generate and shuffle indices
+        indices = np.arange(num_samples)
+        np.random.shuffle(indices)
+        
+        # Split indices into batches
+        batch_indices = [
+            indices[i:i + batch_size] 
+            for i in range(0, num_samples, batch_size)
+        ]
+        
+        return batch_indices
+    
+    def get_pretraining_data(self, indices: np.ndarray) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        """
+        Retrieve the 'data' and 'mask' columns as NumPy arrays for the given indices.
+        Apply mask to data.
+        Return the masked bytes and the proto hierarchy values.
+
+        Args:
+            indices (np.ndarray): The indices to retrieve data for.
+        Returns:
+            list: A list of NumPy arrays containing the masked 'data' values.
+            list: A list of proto hierarchy values.
+        """
+        selected_data = self.data["data"][indices].to_numpy()
+        selected_masks = self.data["mask"][indices].to_numpy()
+        selected_proto_hierarchy = self.data["proto_hierarchy"][indices].to_numpy()
+
+        masked_bytes = self.apply_mask(selected_data, selected_masks)
+
+        return masked_bytes, selected_proto_hierarchy
+
+    def apply_mask(self, bytes, masks):
+        """
+        Apply the mask to the bytes.
+        
+        Args:
+            bytes (list): A list of NumPy ndarray containing the 'data' values as byte objects.
+            masks (list): A list of NumPy ndarrays containing the 'mask' values as byte objects.
+        
+        Returns:
+            list: A list of NumPy arrays containing the masked 'data' values.
+        """
+        masked_bytes = []
+        for data, mask in zip(bytes, masks):
+            data_array = np.frombuffer(data, dtype=np.uint8)
+            mask_array = np.frombuffer(mask, dtype=np.uint8)
+            data_array = data_array.astype(np.int32)
+            mask_array = mask_array.astype(np.int32)
+            masked_data = data_array * (1 - mask_array) + mask_array * self.InputIDEncoder.SpecialIDs["<EndPointMasking>"]
+            masked_bytes.append(masked_data)
+        
+        return masked_bytes
+
+    def get_bytes_as_numpy(self, df: pl.DataFrame) -> tuple[np.ndarray, str]:
+        """
+        Retrieve the 'data' column as a NumPy array for the entire DataFrame.
+        Retrieve the 'mask' column and apply it to data.
+        And return the label assuming all rows have the same label.
+        
+        Args:
+            df (pl.DataFrame): The Polars DataFrame containing the 'data' column.
+        
+        Returns:
+            list: A list of NumPy arrays containing all 'data' values.
+            label: The label of the data as string
+        """
+        selected = df["data"].to_numpy()
+        masks = df["mask"].to_numpy()
+
+        masked_bytes = self.apply_mask(selected, masks)
+
+        label = df["AttackLabel"][0]
+        return masked_bytes, label
+    
+    def pad_sequence_IDs(self, sequence: np.ndarray) -> np.ndarray:
+        """
+        Pad the given sequence of packets with the full byte sequences consisting of the padding token.
+        
+        Args:
+            sequence (np.ndarray): The sequence to pad.
+        
+        Returns:
+            np.ndarray: The padded sequence.
+        """
+        sequence_length = sequence.shape[0]
+        padding_length = (self.seq_len - sequence_length) + 1
+        padded_packets = np.ones((padding_length, 1520), dtype=np.int32) * self.InputIDEncoder.SpecialIDs["<pad>"]
+        padded_sequence = np.concatenate((sequence, padded_packets), axis=0)
+        return padded_sequence, sequence_length
+
+
 import time
 # Test the class
 if __name__ == '__main__':
