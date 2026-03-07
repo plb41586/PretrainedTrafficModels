@@ -10,7 +10,7 @@ class ModelParams:
     """
     MLM Model Parameters
     """
-    vocab_size: int = 261
+    vocab_size: int = 262
     dim: int = 64
     packet_id_len: int = 1520
     pooling_type: str = "DynamicCLS"

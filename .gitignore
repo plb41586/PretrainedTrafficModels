@@ -67,6 +67,8 @@ models/*
 *.keras
 *.h5
 *.pt
+*.pth
+*.ckpt
 
 # Training_logs
 *.log

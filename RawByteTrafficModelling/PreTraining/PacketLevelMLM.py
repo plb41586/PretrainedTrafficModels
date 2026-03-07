@@ -1,4 +1,4 @@
-from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  ModelParams, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone
+from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  ModelParams, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone, AutoregressiveDecoder
 from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder, PreTrainingDatasetHandler
 import polars as pl
 import torch
@@ -21,10 +21,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ### Set Training Parameters
-Epochs = 10
+Epochs = 2
 
 # --- Model Config ---
-vocab_size = 261
+vocab_size = 262
 emb_dim = 32
 seq_lvl_dim = 32
 bytes_per_packet = 1520       # token length per packet
@@ -41,7 +41,7 @@ data = pl.read_parquet("/home/plb41586/workspace/data_artefacts/CICAPT_Phase1.pa
 logger.info(data.head())
 
 # CLS (Classify) token replaces Start Of Sequence  token
-ID_Encoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259, "<EndPointMasking>": 260}, CLS_Placement="EOS")
+ID_Encoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259, "<EndPointMasking>": 260, "<BOS>": 261}, CLS_Placement="EOS")
 DataHandler = PreTrainingDatasetHandler(data, 1, ID_Encoder)
 
 # Init Label ProtoHierarchy Encoder
@@ -62,7 +62,6 @@ MaskedLanguageModel = Packet_MLM(vocab_size=vocab_size,
                                 CLS_Pooling = DynamicCLSPooling(DataHandler.InputIDEncoder.SpecialIDs["<CLS>"]),
                                 Backbone=Backbone,
                                 device=device)
-
 
 loss_fct = nn.CrossEntropyLoss()
 
@@ -134,3 +133,6 @@ for i in range(Epochs):
             optimizer.param_groups[0]['lr'] = learning_rate
             break
             
+MaskedLanguageModel_path = "RawByteTrafficModelling/PreTraining/PacketLevelMLM.pth"
+torch.save(MaskedLanguageModel.state_dict(), MaskedLanguageModel_path)
+logger.info(f"Saved MaskedLanguageModel to {MaskedLanguageModel_path}")
