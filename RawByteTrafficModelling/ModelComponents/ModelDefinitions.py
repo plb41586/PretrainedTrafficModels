@@ -321,10 +321,10 @@ class Packet_Encoder(nn.Module):
     def __init__(   self, 
                     vocab_size: int, 
                     embedding_dim: int,
-                    input_len: int,
-                    latent_dim: int,
-                    latent_len: int,  
                     device: torch.device,
+                    input_len: int = None,
+                    latent_dim: int = None,
+                    latent_len: int = None,  
                     embedding: nn.Module = None,
                     BackBone: nn.Module = None,
                     Pooling: nn.Module = None):
@@ -492,6 +492,95 @@ class AutoregressiveDecoder(nn.Module):
 
         return generated
 
+class PacketAutoencoder(nn.Module):
+    """End-to-end autoencoder that encodes a token sequence into a latent
+    representation via a ``Packet_Encoder`` and reconstructs it
+    autoregressively via an ``AutoregressiveDecoder``.
+
+    Args:
+        vocab_size:     Size of the token vocabulary.
+        embedding_dim:  Dimensionality of token embeddings.
+        max_len:        Maximum sequence length for reconstruction.
+        decoder_backbone: Backbone module for the decoder (any ``nn.Module``
+                        mapping ``(batch, seq_len, embedding_dim)`` →
+                        ``(batch, seq_len, embedding_dim)``).
+        bos_token_id:   Beginning-of-sequence token id used to seed
+                        autoregressive generation.
+        device:         Device to place all sub-modules on.
+        encoder:        Optional pre-built ``Packet_Encoder``. If ``None``,
+                        a default encoder is constructed from the remaining
+                        keyword arguments.
+        encoder_kwargs: Additional keyword arguments forwarded to
+                        ``Packet_Encoder`` when ``encoder`` is ``None``
+                        (e.g. ``BackBone``, ``Pooling``, ``latent_dim``,
+                        ``latent_len``, ``input_len``).
+    """
+
+    def __init__(self, vocab_size: int, embedding_dim: int, max_len: int,
+                 decoder_backbone: nn.Module, bos_token_id: int,
+                 device: torch.device, encoder: nn.Module = None,
+                 **encoder_kwargs):
+        super().__init__()
+
+        if encoder is not None:
+            self.encoder = encoder
+        else:
+            self.encoder = Packet_Encoder(
+                vocab_size=vocab_size,
+                embedding_dim=embedding_dim,
+                device=device,
+                **encoder_kwargs,
+            )
+
+        self.decoder = AutoregressiveDecoder(
+            vocab_size=vocab_size,
+            embedding_dim=embedding_dim,
+            max_len=max_len,
+            Backbone=decoder_backbone,
+            bos_token_id=bos_token_id,
+            device=device,
+        )
+        self.to(device)
+
+    def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Training forward pass with teacher forcing.
+
+        Encodes the input tokens into a latent representation, then
+        autoregressively reconstructs them using teacher forcing.
+
+        Args:
+            tokens: Input token indices of shape ``(batch, seq_len)``.
+
+        Returns:
+            A tuple of:
+                - **logits**: Reconstruction logits of shape
+                  ``(batch, seq_len, vocab_size)`` aligned with ``tokens``.
+                - **latent**: The encoder's latent output, useful for
+                  auxiliary losses (e.g. regularization, contrastive).
+        """
+        latent = self.encoder(tokens)
+        logits = self.decoder(latent, tokens)
+        return logits, latent
+
+    @torch.no_grad()
+    def reconstruct(self, tokens: torch.Tensor, max_len: int = None,
+                    temperature: float = 1.0, eos_token_id: int = None) -> torch.Tensor:
+        """Encode and autoregressively reconstruct a token sequence.
+
+        Args:
+            tokens:        Input token indices of shape ``(batch, seq_len)``.
+            max_len:       Maximum generation length. Defaults to the
+                           decoder's ``max_len``.
+            temperature:   Sampling temperature (0 for greedy).
+            eos_token_id:  Optional early stopping token.
+
+        Returns:
+            Reconstructed token indices of shape ``(batch, generated_len)``.
+        """
+        latent = self.encoder(tokens)
+        return self.decoder.generate(latent, max_len=max_len,
+                                     temperature=temperature,
+                                     eos_token_id=eos_token_id)
 
 class SequenceClassifier(nn.Module):
     def __init__(self, 
