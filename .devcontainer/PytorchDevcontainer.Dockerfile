@@ -62,6 +62,9 @@ RUN /home/$USERNAME/app/venv/bin/pip install mamba-ssm[dev]
 RUN /home/$USERNAME/app/venv/bin/pip install keras-nlp
 RUN /home/$USERNAME/app/venv/bin/pip install scikit-learn
 
+# Set permissions on home directory again
+RUN chown -R $USERNAME:$USERNAME /home/$USERNAME
+
 USER $USERNAME
 ENV PATH=/home/$USERNAME/app/venv/bin:$PATH
 ENV PATH=/workspace/feature_extraction/target/release:$PATH
@@ -69,5 +72,5 @@ ENV PATH=/workspace/feature_extraction/target/release:$PATH
 # Set environment variables for Rust
 RUN echo 'source $HOME/.cargo/env' >> $HOME/.bashrc
 # Activate virtual environment on login
-RUN echo 'source /home/$USERNAME/app/venv/bin/activate' >> $HOME/.bashrc
+RUN echo "source /home/${USERNAME}/app/venv/bin/activate" >> $HOME/.bashrc
 RUN echo 'export PYTHONPATH="${PYTHONPATH}:/workspace"' >> $HOME/.bashrc

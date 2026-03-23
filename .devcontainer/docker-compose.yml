@@ -9,7 +9,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 2
+              count: 1
               capabilities: [gpu]
     volumes:
       - ..:/home/plb41586/workspace:cached
