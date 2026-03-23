@@ -58,6 +58,7 @@ MANIFEST
 *.tar.xz
 *.pkl
 *.graphml
+*.npy
 data/*
 data_artefacts/*
 

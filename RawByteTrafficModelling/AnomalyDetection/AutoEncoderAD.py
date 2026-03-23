@@ -8,9 +8,9 @@ import numpy as np
 import torch.nn as nn
 import logging
 import torch.nn.functional as F
+import os
 
-
-output_dir = "RawByteTrafficModelling/PreTraining/TrainingOutputs"
+output_dir = "RawByteTrafficModelling/AnomalyDetection/Outputs"
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -22,9 +22,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-### Set Training Parameters
-Epochs = 1
-
 # --- Model Config ---
 vocab_size = 262
 emb_dim = 32
@@ -33,11 +30,6 @@ bytes_per_packet = 1520       # token length per packet
 packets_per_sequence = 64     # max packets per sequence
 num_classes = 14
 batch_size = 1024
-
-learning_rate = 8e-4
-
-alpha_proto = 4
-alpha_reconstruction = 1
 
 data = pl.read_parquet("/home/plb41586/workspace/data_artefacts/IIoTset-Ferrag/NormalMerged.parquet")
 logger.info(data.head())
@@ -50,14 +42,12 @@ DataHandler = PreTrainingDatasetHandler(data, 1, ID_Encoder)
 ProtoHierarchyEncoder = OneHotEncoder(sparse_output=False, dtype=np.float32)
 ProtoHierarchyEncodings = ProtoHierarchyEncoder.fit_transform(DataHandler.data["proto_hierarchy"].unique().to_numpy().reshape(-1, 1))
 
-
 device = torch.device("cuda")
 assert device == torch.device("cuda")
 
+
 # Backbone = TransformerBackbone(d_model=emb_dim, nhead=4, num_layers=2, max_len=1520).to(device)
 Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
-
-
 
 MaskedLanguageModel = Packet_MLM(vocab_size=vocab_size, 
                                 embedding_dim=emb_dim, 
@@ -65,9 +55,6 @@ MaskedLanguageModel = Packet_MLM(vocab_size=vocab_size,
                                 CLS_Pooling = DynamicCLSPooling(DataHandler.InputIDEncoder.SpecialIDs["<CLS>"]),
                                 Backbone=Backbone,
                                 device=device)
-
-MaskedLanguageModel.load_state_dict(torch.load(f"{output_dir}/PacketLevelMLM_EdgeIIoT.pth"))
-
 
 
 PacketEncoder = Packet_Encoder(vocab_size=vocab_size,
@@ -96,26 +83,13 @@ AutoEncoder = PacketAutoencoder(vocab_size=vocab_size,
                                 encoder=PacketEncoder,
 )
 
+AutoEncoder.load_state_dict(torch.load(f"/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketLevelAutoEncoder_EdgeIIoT.pth"))
 
 loss_fct = nn.CrossEntropyLoss()
 
-optimizer = torch.optim.AdamW(AutoEncoder.parameters(), lr=learning_rate, weight_decay=1e-2)
+losses = []
 
-unselectable_token_ids = [DataHandler.InputIDEncoder.SpecialIDs["</s>"], 
-                        DataHandler.InputIDEncoder.SpecialIDs["<pad>"],
-                        DataHandler.InputIDEncoder.SpecialIDs["<CLS>"],
-                        DataHandler.InputIDEncoder.SpecialIDs["<EndPointMasking>"]]
-
-
-Masker = MaskedLMMaskGenerator( vocabulary_size = ModelParams.vocab_size, 
-                                mask_token_id = DataHandler.InputIDEncoder.SpecialIDs["<mask>"], 
-                                mask_selection_length=ModelParams.packet_id_len*0.25, 
-                                mask_selection_rate=0.10,
-                                mask_token_rate=0.9,
-                                random_token_rate=0.1,
-                                unselectable_token_ids=unselectable_token_ids)
-
-for i in range(Epochs):
+with torch.no_grad():
     batches = DataHandler.sample_epoch_packet_indices(batch_size)
     for index, batch in enumerate(batches):
         bytes, proto_hierarchy = DataHandler.get_pretraining_data(batch)
@@ -128,23 +102,43 @@ for i in range(Epochs):
         predictions = torch.argmax(logits, dim=-1)
         reconstruction_accuracy = (predictions == input_ids).float().mean().item()
 
-        # Backward Pass
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
-
-        logger.info(f"Epoch {i+1}/{Epochs}")
         logger.info(f"Pretraining Batch {index}/{len(batches)}")
         logger.info(f"Total Loss: {loss.item()}")
         logger.info(f"Reconstruction Loss: {loss} Reconstruction Accuracy: {reconstruction_accuracy}")
+        losses.append(loss.item())
 
-        # if reconstruction_accuracy > 0.45 and CLS_accuracy > 0.80 and batch_size < 2048:
-        #     logger.info("Increasing Batch Size")
-        #     batch_size = 2048
-        #     learning_rate = learning_rate * 10
-        #     optimizer.param_groups[0]['lr'] = learning_rate
-        #     break
-            
-AutoEncoderModel_path = f"{output_dir}/PacketLevelAutoEncoder_EdgeIIoT.pth"
-torch.save(AutoEncoder.state_dict(), AutoEncoderModel_path)
-logger.info(f"Saved MaskedLanguageModel to {AutoEncoderModel_path}")
+
+losses = np.array(losses)
+np.save(f"{output_dir}/AutoEncoder_AnomalyDetection_NormalLosses.npy", losses)
+
+attack_dir = 'data_artefacts/IIoTset-Ferrag/attacks'
+attack_files = os.listdir(attack_dir)
+for file in attack_files:
+    if not file.endswith('.parquet'): continue
+    path = f"{attack_dir}/{file}"
+    attack_data = pl.read_parquet(path)
+    logger.info(data.head())
+    AttackHandler = PreTrainingDatasetHandler(attack_data, 1, ID_Encoder)
+    attack_losses = []
+    with torch.no_grad():
+        batches = AttackHandler.sample_epoch_packet_indices(batch_size)
+        for index, batch in enumerate(batches):
+            bytes, proto_hierarchy = AttackHandler.get_pretraining_data(batch)
+            input_ids = AttackHandler.InputIDEncoder.construct_input_ids(bytes)
+            input_ids = torch.tensor(input_ids, dtype=torch.long).to(device)
+            #Perform Forward Pass
+            logits, latent = AutoEncoder(input_ids)
+            loss = F.cross_entropy(logits.reshape(-1, vocab_size), input_ids.reshape(-1))
+
+            predictions = torch.argmax(logits, dim=-1)
+            reconstruction_accuracy = (predictions == input_ids).float().mean().item()
+
+            logger.info(f"Pretraining Batch {index}/{len(batches)}")
+            logger.info(f"Total Loss: {loss.item()}")
+            logger.info(f"Reconstruction Loss: {loss} Reconstruction Accuracy: {reconstruction_accuracy}")
+            attack_losses.append(loss.item())
+
+    attack_losses = np.array(attack_losses)
+    attack_name = file.removesuffix(".parquet")
+    np.save(f"{output_dir}/AutoEncoder_AnomalyDetection_{attack_name}_Losses.npy", losses)
+print("Done")

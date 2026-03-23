@@ -8,13 +8,14 @@ import numpy as np
 import torch.nn as nn
 import logging
 
+output_dir = "RawByteTrafficModelling/PreTraining/TrainingOutputs"
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('RawByteTrafficModelling/PreTraining/PacketLevelMLM.log'),
+        logging.FileHandler(f'{output_dir}/PacketLevelMLM_EdgeIIoT.log'),
         logging.StreamHandler()
     ]
 )
@@ -37,7 +38,7 @@ learning_rate = 8e-4
 alpha_proto = 4
 alpha_reconstruction = 1
 
-data = pl.read_parquet("/home/plb41586/workspace/data_artefacts/CICAPT_Phase1.parquet")
+data = pl.read_parquet("/home/plb41586/workspace/data_artefacts/IIoTset-Ferrag/NormalMerged.parquet")
 logger.info(data.head())
 
 # CLS (Classify) token replaces Start Of Sequence  token
@@ -61,7 +62,7 @@ MaskedLanguageModel = Packet_MLM(vocab_size=vocab_size,
                                 num_CLS_classes=ProtoHierarchyEncodings.shape[1],
                                 CLS_Pooling = DynamicCLSPooling(DataHandler.InputIDEncoder.SpecialIDs["<CLS>"]),
                                 Backbone=Backbone,
-                                device=device)
+                                device=device).to(device)
 
 loss_fct = nn.CrossEntropyLoss()
 
@@ -133,6 +134,6 @@ for i in range(Epochs):
             optimizer.param_groups[0]['lr'] = learning_rate
             break
             
-MaskedLanguageModel_path = "RawByteTrafficModelling/PreTraining/PacketLevelMLM.pth"
+MaskedLanguageModel_path = f"{output_dir}/PacketLevelMLM_EdgeIIoT.pth"
 torch.save(MaskedLanguageModel.state_dict(), MaskedLanguageModel_path)
 logger.info(f"Saved MaskedLanguageModel to {MaskedLanguageModel_path}")
