@@ -48,10 +48,8 @@ struct Cli {
     #[arg(short, long)]
     graph_name: Option<String>,
 
-    /// Polars output path
-    /// If omitted no Polars Dataframe is created
-    
-    #[arg(short, long, default_value = "/home/plb41586/workspace/data_artefacts/CICAPT_Phase1.parquet")]
+    /// Polars output path, if ommited no dataframe is saved
+    #[arg(short, long)]
     pl_outfile: Option<PathBuf>
 }
 
