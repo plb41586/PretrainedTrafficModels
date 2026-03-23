@@ -140,5 +140,5 @@ for file in attack_files:
 
     attack_losses = np.array(attack_losses)
     attack_name = file.removesuffix(".parquet")
-    np.save(f"{output_dir}/AutoEncoder_AnomalyDetection_{attack_name}_Losses.npy", losses)
+    np.save(f"{output_dir}/AutoEncoder_AnomalyDetection_{attack_name}_Losses.npy", attack_losses)
 print("Done")
