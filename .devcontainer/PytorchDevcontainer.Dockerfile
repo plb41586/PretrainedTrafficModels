@@ -69,6 +69,7 @@ USER $USERNAME
 ENV PATH=/home/$USERNAME/app/venv/bin:$PATH
 ENV PATH=/workspace/feature_extraction/target/release:$PATH
 
+RUN /home/$USERNAME/app/venv/bin/pip install plotly
 # Set environment variables for Rust
 RUN echo 'source $HOME/.cargo/env' >> $HOME/.bashrc
 # Activate virtual environment on login
