@@ -1,29 +1,64 @@
 import torch
 import torch.nn as nn
 from mamba_ssm import Mamba
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, fields
 from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder
 import math
+from RawByteTrafficModelling.ModelComponents.BackBones import BackboneParams, TransformerBackboneParams, MambaBackboneParams, MambaBackbone, TransformerBackbone
 
 @dataclass
 class ModelParams:
     """
-    MLM Model Parameters
+    Encoder Params
     """
-    vocab_size: int = 262
-    dim: int = 64
-    packet_id_len: int = 1520
-    pooling_type: str = "DynamicCLS"
+    vocab_size: int
+    EncoderDim: int
+    packet_id_len: int
+    pooling_type: str
+    EncoderBackboneType: str
+    EncoderBackboneParams: BackboneParams
+    CLS_ID: int 
     """
-    PacketLevel Classifier Parameters
+    MLM Params
     """
-    latent_dim: int = 64,
-    latent_len: int = 1,
+    NumCLSclasses: int = None
     """
-    Sequence Classifier
+    Classifier Params
     """
-    PacketSequenceLength: int =16
-    SeqClassifierDim: int = 64
+    NumAttackClasses: int = None
+    """
+    SequenceClassifier Params
+    """
+    PacketSequenceLength: int = None
+    SeqClassifierDim: int = None
+
+def save_checkpoint(model, optimizer, epoch, loss, config: ModelParams, path: str):
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss,
+        'config': asdict(config),
+    }, path)
+
+def load_checkpoint(path: str, device='cpu'):
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    config = ModelParams(**ckpt['config'])
+    if config.EncoderBackboneType == "Mamba":
+        config.EncoderBackboneParams = MambaBackboneParams(**config.EncoderBackboneParams)
+    elif config.EncoderBackboneType == "Transformer":
+        config.EncoderBackboneParams = TransformerBackbone(**config.EncoderBackboneParams)
+    else: raise Exception("Backbone Type is not supported")
+
+    # # Reconstruct model from config
+    # model = MyModel(
+    #     hidden_dim=config.hidden_dim,
+    #     num_layers=config.num_layers,
+    #     dropout=config.dropout,
+    # )
+    # model.load_state_dict(ckpt['model_state_dict'])
+
+    return config, ckpt
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -79,133 +114,6 @@ class DynamicCLSPooling(nn.Module):
 
         return cls_embeddings
 
-class MambaBackbone(nn.Module):
-    """Stacked Mamba (S4/SSM) backbone for sequence modeling.
-
-    Applies multiple Mamba layers with residual connections and layer
-    normalization.
-
-    Args:
-        d_model:    Dimensionality of the input and output embeddings.
-        num_layers: Number of stacked Mamba layers.
-        d_state:    State dimensionality of the structured state space model.
-        d_conv:     Kernel size of the local convolution in each Mamba block.
-        expand:     Expansion factor for the inner projection dimension.
-        dropout:    Dropout probability applied before and after the layer stack.
-    """
-
-    def __init__(self, d_model: int, num_layers: int, d_state: int = 16, d_conv: int = 4, expand: int = 2, dropout: float = 0.1):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        self.layers = nn.ModuleList([
-            Mamba(
-                d_model=d_model,
-                d_state=d_state,
-                d_conv=d_conv,
-                expand=expand,
-            )
-            for _ in range(num_layers)
-        ])
-        self.norms = nn.ModuleList([
-            nn.LayerNorm(d_model)
-            for _ in range(num_layers)
-        ])
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the input through all Mamba layers.
-
-        Args:
-            x: Input tensor of shape ``(batch, seq_len, d_model)``.
-
-        Returns:
-            Output tensor of the same shape after applying all Mamba
-            layers with residual connections, layer normalization, and
-            dropout.
-        """
-        h = self.dropout(x)
-        for mamba, norm in zip(self.layers, self.norms):
-            h = norm(mamba(h) + h)
-        h = self.dropout(h)
-        return h
-
-
-class TransformerBackbone(nn.Module):
-    """Standard Transformer encoder backbone with sinusoidal positional encoding.
-
-    Wraps ``nn.TransformerEncoder`` with fixed sinusoidal position embeddings
-    and configurable depth/dropout.
-
-    Args:
-        d_model:    Dimensionality of the input and output embeddings.
-        nhead:      Number of attention heads per layer.
-        num_layers: Number of stacked TransformerEncoderLayers.
-        max_len:    Maximum supported sequence length for positional encoding.
-        dropout:    Dropout probability applied to positional embeddings and
-                    within each transformer layer.
-    """
-
-    def __init__(self, d_model: int, nhead: int, num_layers: int, max_len: int, dropout: float = 0.1):
-        super().__init__()
-        self._init_sinusoidal_encoding(max_len, d_model)
-        self.dropout = nn.Dropout(p=dropout)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_layers,
-        )
-
-    def _init_sinusoidal_encoding(self, max_len: int, d_model: int) -> None:
-        """Generate and register fixed sinusoidal positional encodings.
-
-        Args:
-            max_len: Maximum sequence length.
-            d_model: Embedding dimensionality.
-        """
-        pe = torch.zeros(max_len, d_model)
-        pos = torch.arange(0, max_len).unsqueeze(1).float()
-        div = torch.exp(torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(pos * div)
-        pe[:, 1::2] = torch.cos(pos * div)
-        self.register_buffer('pos_encoding', pe.unsqueeze(0))
-
-    @staticmethod
-    def generate_causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
-        """Generate an upper-triangular causal attention mask.
-
-        Args:
-            seq_len: Length of the sequence.
-            device:  Device to create the mask on.
-
-        Returns:
-            A ``(seq_len, seq_len)`` mask with ``-inf`` above the diagonal
-            and ``0`` on and below, suitable for ``nn.TransformerEncoder``.
-        """
-        return torch.triu(torch.full((seq_len, seq_len), float('-inf'), device=device), diagonal=1)
-
-    def forward(self, x: torch.Tensor, mask: torch.Tensor = None, causal: bool = False) -> torch.Tensor:
-        """Run the input through positional encoding and all transformer layers.
-
-        Args:
-            x:      Input tensor of shape ``(batch, seq_len, d_model)``.
-            mask:   Optional attention mask passed to the transformer encoder.
-                    Takes precedence over ``causal`` if provided.
-            causal: If ``True`` and ``mask`` is ``None``, automatically
-                    generates a causal (upper-triangular) attention mask.
-
-        Returns:
-            Output tensor of the same shape.
-        """
-        h = self.dropout(x + self.pos_encoding[:, :x.size(1), :])
-        if mask is None and causal:
-            mask = self.generate_causal_mask(x.size(1), x.device)
-        h = self.transformer_encoder(h, mask=mask)
-        h = self.dropout(h)
-        return h
 
 
 class Packet_MLM(nn.Module):
@@ -231,15 +139,21 @@ class Packet_MLM(nn.Module):
         device:           Device to place all sub-modules on.
     """
 
-    def __init__(self, vocab_size: int, embedding_dim: int, num_CLS_classes: int,
-                 CLS_Pooling: nn.Module, Backbone: nn.Module, device: torch.device):
+    def __init__(self, Params: ModelParams, Backbone = None):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embedding_dim)
-        self.Backbone = Backbone
-        self.reconstruction_output = nn.Linear(embedding_dim, vocab_size, bias=False)
-        self.CLS_Pooling = CLS_Pooling
-        self.CLS_output = nn.Linear(embedding_dim, num_CLS_classes, bias=False)
-        self.to(device)
+        self.embedding = nn.Embedding(Params.vocab_size, Params.EncoderDim)
+        if Backbone == None:
+            if Params.EncoderBackboneType == "Transformer":
+                self.Backbone = TransformerBackbone(Params.EncoderBackboneParams)
+            if Params.EncoderBackboneType == "Mamba":
+                self.Backbone = MambaBackbone(Params.EncoderBackboneParams)
+            else:
+                raise Exception("Backbone Type is not supported")
+        else:
+            self.Backbone = Backbone
+        self.reconstruction_output = nn.Linear(Params.EncoderDim, Params.vocab_size, bias=False)
+        self.CLS_Pooling = DynamicCLSPooling(Params.CLS_ID)
+        self.CLS_output = nn.Linear(Params.EncoderDim, Params.NumCLSclasses, bias=False)
 
     def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass producing both reconstruction and classification logits.
@@ -263,13 +177,7 @@ class Packet_MLM(nn.Module):
 
 class Packet_Classifier(nn.Module):
     def __init__(   self, 
-                    vocab_size: int, 
-                    embedding_dim: int,
-                    input_len: int,
-                    latent_dim: int,
-                    latent_len: int,  
-                    num_classes: int,
-                    device: torch.device,
+                    params: ModelParams,
                     embedding: nn.Module = None,
                     BackBone: nn.Module = None,
                     Pooling: nn.Module = None):
@@ -277,28 +185,26 @@ class Packet_Classifier(nn.Module):
         self.device = device
         
         if embedding is None:
-            self.embedding = nn.Embedding(vocab_size, embedding_dim).to(device)
+            self.embedding = nn.Embedding(params.vocab_size, params.EncoderDim).to(device)
         else:
             self.embedding = embedding.to(device)
         
-        if BackBone is None:
-            self.BackBone = Mamba(
-                    d_model=embedding_dim,
-                    d_state=16,
-                    d_conv=4,
-                    expand=2
-                ).to(device)
+        if BackBone == None:
+            if Params.EncoderBackboneType == "Transformer":
+                self.Backbone = TransformerBackbone(Params.EncoderBackboneParams)
+            if Params.EncoderBackboneType == "Mamba":
+                self.Backbone = MambaBackbone(Params.EncoderBackboneParams)
+            else:
+                raise Exception("Backbone Type is not supported")
         else:
-            self.BackBone = BackBone.to(device)
+            self.Backbone = BackBone
 
         if Pooling is None:
-            assert embedding_dim == latent_dim, "Embedding and latent dimensions must match for default pooling."
-            assert latent_len == input_len, "Input and latent lengths must match for default pooling."
-            self.Pooler = nn.Identity()
+            self.CLS_Pooling = DynamicCLSPooling(Params.CLS_ID)
         else:
             self.Pooler = Pooling.to(device)
         
-        self.output = nn.Linear(latent_dim*latent_len, num_classes, bias=False).to(device)
+        self.output = nn.Linear(params.EncoderDim, params.NumAttackClasses, bias=False).to(device)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         """
@@ -319,12 +225,7 @@ class Packet_Classifier(nn.Module):
 
 class Packet_Encoder(nn.Module):
     def __init__(   self, 
-                    vocab_size: int, 
-                    embedding_dim: int,
-                    device: torch.device,
-                    input_len: int = None,
-                    latent_dim: int = None,
-                    latent_len: int = None,  
+                    params: ModelParams,
                     embedding: nn.Module = None,
                     BackBone: nn.Module = None,
                     Pooling: nn.Module = None):
@@ -704,6 +605,24 @@ if __name__ == "__main__":
     TokenIDEncoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259}, CLS_Placement="EOS")
 
     # --- Config ---
+    backboneparams = MambaBackboneParams(
+        dim=32
+    )
+    params = ModelParams(
+        vocab_size=262,
+        EncoderDim=32,
+        packet_id_len=1520,
+        pooling_type="DynamicCLS",
+        EncoderBackboneType="Mamba",
+        EncoderBackboneParams=MambaBackboneParams(dim=32),
+        CLS_ID=TokenIDEncoder.SpecialIDs["<CLS>"],
+        NumCLSclasses=14,
+        NumAttackClasses=14,
+        PacketSequenceLength=16,
+        SeqClassifierDim=64)
+    
+    MLM = Packet_MLM(params)
+
     vocab_size = 260
     emb_dim = 32
     seq_lvl_dim = 32

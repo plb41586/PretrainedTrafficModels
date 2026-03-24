@@ -1,4 +1,5 @@
 from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  ModelParams, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone, AutoregressiveDecoder
+from RawByteTrafficModelling.ModelComponents.BackBones import MambaBackboneParams, TransformerBackboneParams
 from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder, PreTrainingDatasetHandler
 import polars as pl
 import torch
@@ -7,8 +8,9 @@ from sklearn.preprocessing import OneHotEncoder
 import numpy as np
 import torch.nn as nn
 import logging
+from RawByteTrafficModelling.ModelComponents.ModelDefinitions import save_checkpoint, load_checkpoint
 
-output_dir = "RawByteTrafficModelling/PreTraining/TrainingOutputs"
+output_dir = "RawByteTrafficModelling/PreTraining/TrainingOutputs/test"
 
 # Configure logging
 logging.basicConfig(
@@ -22,15 +24,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ### Set Training Parameters
-Epochs = 2
+Epochs = 1
 
-# --- Model Config ---
-vocab_size = 262
-emb_dim = 32
-seq_lvl_dim = 32
-bytes_per_packet = 1520       # token length per packet
-packets_per_sequence = 64     # max packets per sequence
-num_classes = 14
 batch_size = 128
 
 learning_rate = 8e-4
@@ -42,7 +37,8 @@ data = pl.read_parquet("/home/plb41586/workspace/data_artefacts/IIoTset-Ferrag/N
 logger.info(data.head())
 
 # CLS (Classify) token replaces Start Of Sequence  token
-ID_Encoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259, "<EndPointMasking>": 260, "<BOS>": 261}, CLS_Placement="EOS")
+SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259, "<EndPointMasking>": 260, "<BOS>": 261}
+ID_Encoder = ID_Encoder(SpecialIDs=SpecialIDs, CLS_Placement="EOS")
 DataHandler = PreTrainingDatasetHandler(data, 1, ID_Encoder)
 
 # Init Label ProtoHierarchy Encoder
@@ -54,15 +50,25 @@ device = torch.device("cuda")
 assert device == torch.device("cuda")
 
 # Backbone = TransformerBackbone(d_model=emb_dim, nhead=4, num_layers=2, max_len=1520).to(device)
-Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
+# Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
+
+# --- Model Config ---
+params = ModelParams(### Encoder Params
+    vocab_size=262,
+    EncoderDim=32,
+    packet_id_len=1520,
+    pooling_type="DynamicCLS",
+    EncoderBackboneType="Mamba",
+    EncoderBackboneParams=MambaBackboneParams(dim=32),
+    CLS_ID=SpecialIDs["<CLS>"],
+    NumCLSclasses=ProtoHierarchyEncodings.shape[1], ### MLM Params
+    NumAttackClasses=14, ### General Classification Params
+    PacketSequenceLength=64, ## Sequence Params
+    SeqClassifierDim=32)
 
 
-MaskedLanguageModel = Packet_MLM(vocab_size=vocab_size, 
-                                embedding_dim=emb_dim, 
-                                num_CLS_classes=ProtoHierarchyEncodings.shape[1],
-                                CLS_Pooling = DynamicCLSPooling(DataHandler.InputIDEncoder.SpecialIDs["<CLS>"]),
-                                Backbone=Backbone,
-                                device=device).to(device)
+MaskedLanguageModel = Packet_MLM(params
+                                ).to(device)
 
 loss_fct = nn.CrossEntropyLoss()
 
@@ -74,15 +80,15 @@ unselectable_token_ids = [DataHandler.InputIDEncoder.SpecialIDs["</s>"],
                         DataHandler.InputIDEncoder.SpecialIDs["<EndPointMasking>"]]
 
 
-Masker = MaskedLMMaskGenerator( vocabulary_size = ModelParams.vocab_size, 
+Masker = MaskedLMMaskGenerator( vocabulary_size = params.vocab_size, 
                                 mask_token_id = DataHandler.InputIDEncoder.SpecialIDs["<mask>"], 
-                                mask_selection_length=ModelParams.packet_id_len*0.25, 
+                                mask_selection_length=params.packet_id_len*0.25, 
                                 mask_selection_rate=0.10,
                                 mask_token_rate=0.9,
                                 random_token_rate=0.1,
                                 unselectable_token_ids=unselectable_token_ids)
 
-for i in range(Epochs):
+for epoch in range(Epochs):
 
     batches = DataHandler.sample_epoch_packet_indices(batch_size)
     for index, batch in enumerate(batches):
@@ -121,12 +127,13 @@ for i in range(Epochs):
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
-        logger.info(f"Epoch {i+1}/{Epochs}")
+        logger.info(f"Epoch {epoch+1}/{Epochs}")
         logger.info(f"Pretraining Batch {index}/{len(batches)}")
         logger.info(f"Total Loss: {loss.item()}")
         logger.info(f"Reconstruction Loss: {reconstruction_loss} Reconstruction Accuracy: {reconstruction_accuracy}")
         logger.info(f"ProtoHierarchy Loss: {proto_hierarchyloss} ProtoHierarchy Accuracy: {CLS_accuracy}")
 
+        break # just for testing
         if reconstruction_accuracy > 0.45 and CLS_accuracy > 0.80 and batch_size < 2048:
             logger.info("Increasing Batch Size")
             batch_size = 2048
@@ -135,5 +142,6 @@ for i in range(Epochs):
             break
             
 MaskedLanguageModel_path = f"{output_dir}/PacketLevelMLM_EdgeIIoT.pth"
-torch.save(MaskedLanguageModel.state_dict(), MaskedLanguageModel_path)
+# torch.save(MaskedLanguageModel.state_dict(), MaskedLanguageModel_path)
+save_checkpoint(MaskedLanguageModel, optimizer, epoch, loss, params, MaskedLanguageModel_path)
 logger.info(f"Saved MaskedLanguageModel to {MaskedLanguageModel_path}")

@@ -8,7 +8,13 @@ import numpy as np
 import torch.nn as nn
 import logging
 import torch.nn.functional as F
+from RawByteTrafficModelling.ModelComponents.ModelDefinitions import load_checkpoint
 
+config, ckpt = load_checkpoint("/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/test/PacketLevelMLM_EdgeIIoT.pth")
+
+MaskedLanguageModel = Packet_MLM(config) 
+
+MaskedLanguageModel.load_state_dict(ckpt['model_state_dict'])
 
 output_dir = "RawByteTrafficModelling/PreTraining/TrainingOutputs"
 # Configure logging
@@ -25,19 +31,19 @@ logger = logging.getLogger(__name__)
 ### Set Training Parameters
 Epochs = 1
 
-# --- Model Config ---
-vocab_size = 262
-emb_dim = 32
-seq_lvl_dim = 32
-bytes_per_packet = 1520       # token length per packet
-packets_per_sequence = 64     # max packets per sequence
-num_classes = 14
-batch_size = 1024
+# # --- Model Config ---
+# vocab_size = 262
+# emb_dim = 32
+# seq_lvl_dim = 32
+# bytes_per_packet = 1520       # token length per packet
+# packets_per_sequence = 64     # max packets per sequence
+# num_classes = 14
+# batch_size = 1024
 
-learning_rate = 8e-4
+# learning_rate = 8e-4
 
-alpha_proto = 4
-alpha_reconstruction = 1
+# alpha_proto = 4
+# alpha_reconstruction = 1
 
 data = pl.read_parquet("/home/plb41586/workspace/data_artefacts/IIoTset-Ferrag/NormalMerged.parquet")
 logger.info(data.head())
@@ -55,18 +61,10 @@ device = torch.device("cuda")
 assert device == torch.device("cuda")
 
 # Backbone = TransformerBackbone(d_model=emb_dim, nhead=4, num_layers=2, max_len=1520).to(device)
-Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
+# Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
 
 
 
-MaskedLanguageModel = Packet_MLM(vocab_size=vocab_size, 
-                                embedding_dim=emb_dim, 
-                                num_CLS_classes=ProtoHierarchyEncodings.shape[1],
-                                CLS_Pooling = DynamicCLSPooling(DataHandler.InputIDEncoder.SpecialIDs["<CLS>"]),
-                                Backbone=Backbone,
-                                device=device)
-
-MaskedLanguageModel.load_state_dict(torch.load(f"{output_dir}/PacketLevelMLM_EdgeIIoT.pth"))
 
 
 
