@@ -6,33 +6,65 @@ from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder
 import math
 from RawByteTrafficModelling.ModelComponents.BackBones import BackboneParams, TransformerBackboneParams, MambaBackboneParams, MambaBackbone, TransformerBackbone
 
+def unpack_backbone_params(type: str, config: dict):
+    if type == "Mamba":
+        BackboneParams = MambaBackboneParams(**config)
+    elif type == "Transformer":
+        BackboneParams = TransformerBackbone(**config)
+    else: raise Exception("Backbone Type is not supported")
+    return BackboneParams
+
 @dataclass
-class ModelParams:
-    """
-    Encoder Params
-    """
+class EncoderParams:
     vocab_size: int
     EncoderDim: int
     packet_id_len: int
     pooling_type: str
-    EncoderBackboneType: str
-    EncoderBackboneParams: BackboneParams
-    CLS_ID: int 
-    """
-    MLM Params
-    """
-    NumCLSclasses: int = None
-    """
-    Classifier Params
-    """
-    NumAttackClasses: int = None
-    """
-    SequenceClassifier Params
-    """
-    PacketSequenceLength: int = None
-    SeqClassifierDim: int = None
+    BackboneType: str
+    BackboneParams: BackboneParams
+    CLS_ID: int
+    SpecialTokens: dict
 
-def save_checkpoint(model, optimizer, epoch, loss, config: ModelParams, path: str):
+def unpack_encoder_params(config: dict):
+    params = EncoderParams(**config)
+    params.BackboneParams = unpack_backbone_params(params.BackboneType,
+                                                   params.BackboneParams)
+    return params
+
+
+@dataclass
+class MLM_Params:
+    EncoderParams: EncoderParams
+    NumCLSclasses: int = None
+
+def load_MLM_checkpoint(path: str, device='cpu'):
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    config = MLM_Params(**ckpt['config'])
+    config.EncoderParams = unpack_encoder_params(config.EncoderParams)
+    return config, ckpt
+
+
+@dataclass
+class PacketClassifierParams:
+    EncoderParams: EncoderParams
+    NumAttackClasses: int = None
+
+@dataclass
+class AutoEncoderParams:
+    ENC_Params: EncoderParams
+    DecBackboneType: str
+    DecBackbone: BackboneParams
+    bos_token_id: int
+
+def load_AE_params(path: str, device='cpu'):
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    config = AutoEncoderParams(**ckpt['config'])
+    config.ENC_Params = unpack_encoder_params(config.ENC_Params)
+    config.DecBackbone = unpack_backbone_params(config.DecBackboneType,
+                                                config.DecBackbone)
+    return config, ckpt
+
+def save_checkpoint(model, optimizer, epoch, loss, config, path: str):
     torch.save({
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -41,24 +73,6 @@ def save_checkpoint(model, optimizer, epoch, loss, config: ModelParams, path: st
         'config': asdict(config),
     }, path)
 
-def load_checkpoint(path: str, device='cpu'):
-    ckpt = torch.load(path, map_location=device, weights_only=False)
-    config = ModelParams(**ckpt['config'])
-    if config.EncoderBackboneType == "Mamba":
-        config.EncoderBackboneParams = MambaBackboneParams(**config.EncoderBackboneParams)
-    elif config.EncoderBackboneType == "Transformer":
-        config.EncoderBackboneParams = TransformerBackbone(**config.EncoderBackboneParams)
-    else: raise Exception("Backbone Type is not supported")
-
-    # # Reconstruct model from config
-    # model = MyModel(
-    #     hidden_dim=config.hidden_dim,
-    #     num_layers=config.num_layers,
-    #     dropout=config.dropout,
-    # )
-    # model.load_state_dict(ckpt['model_state_dict'])
-
-    return config, ckpt
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -139,21 +153,22 @@ class Packet_MLM(nn.Module):
         device:           Device to place all sub-modules on.
     """
 
-    def __init__(self, Params: ModelParams, Backbone = None):
+    def __init__(self, params: MLM_Params, Backbone = None):
         super().__init__()
-        self.embedding = nn.Embedding(Params.vocab_size, Params.EncoderDim)
+        ENCparams = params.EncoderParams
+        self.embedding = nn.Embedding(ENCparams.vocab_size, ENCparams.EncoderDim)
         if Backbone == None:
-            if Params.EncoderBackboneType == "Transformer":
-                self.Backbone = TransformerBackbone(Params.EncoderBackboneParams)
-            if Params.EncoderBackboneType == "Mamba":
-                self.Backbone = MambaBackbone(Params.EncoderBackboneParams)
+            if ENCparams.BackboneType == "Transformer":
+                self.Backbone = TransformerBackbone(ENCparams.BackboneParams)
+            if ENCparams.BackboneType == "Mamba":
+                self.Backbone = MambaBackbone(ENCparams.BackboneParams)
             else:
                 raise Exception("Backbone Type is not supported")
         else:
             self.Backbone = Backbone
-        self.reconstruction_output = nn.Linear(Params.EncoderDim, Params.vocab_size, bias=False)
-        self.CLS_Pooling = DynamicCLSPooling(Params.CLS_ID)
-        self.CLS_output = nn.Linear(Params.EncoderDim, Params.NumCLSclasses, bias=False)
+        self.reconstruction_output = nn.Linear(ENCparams.EncoderDim, ENCparams.vocab_size, bias=False)
+        self.CLS_Pooling = DynamicCLSPooling(ENCparams.CLS_ID)
+        self.CLS_output = nn.Linear(ENCparams.EncoderDim, params.NumCLSclasses, bias=False)
 
     def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass producing both reconstruction and classification logits.
@@ -177,34 +192,17 @@ class Packet_MLM(nn.Module):
 
 class Packet_Classifier(nn.Module):
     def __init__(   self, 
-                    params: ModelParams,
-                    embedding: nn.Module = None,
-                    BackBone: nn.Module = None,
-                    Pooling: nn.Module = None):
+                    params: PacketClassifierParams,
+                    encoder: nn.Module = None):
         super().__init__()
-        self.device = device
+        ENCparams = params.EncoderParams
         
-        if embedding is None:
-            self.embedding = nn.Embedding(params.vocab_size, params.EncoderDim).to(device)
+        if encoder is None:
+            self.encoder = Packet_Encoder(ENCparams)
         else:
-            self.embedding = embedding.to(device)
+            self.encoder = encoder
         
-        if BackBone == None:
-            if Params.EncoderBackboneType == "Transformer":
-                self.Backbone = TransformerBackbone(Params.EncoderBackboneParams)
-            if Params.EncoderBackboneType == "Mamba":
-                self.Backbone = MambaBackbone(Params.EncoderBackboneParams)
-            else:
-                raise Exception("Backbone Type is not supported")
-        else:
-            self.Backbone = BackBone
-
-        if Pooling is None:
-            self.CLS_Pooling = DynamicCLSPooling(Params.CLS_ID)
-        else:
-            self.Pooler = Pooling.to(device)
-        
-        self.output = nn.Linear(params.EncoderDim, params.NumAttackClasses, bias=False).to(device)
+        self.output = nn.Linear(ENCparams.EncoderDim, params.NumAttackClasses, bias=False).to(device)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         """
@@ -216,16 +214,14 @@ class Packet_Classifier(nn.Module):
         Returns:
             torch.Tensor: The raw logits.
         """
-        h = self.embedding(tokens)
-        h = self.BackBone(h)
-        h = self.Pooler(h, tokens)
+        h = self.encoder(tokens)
         h = h.view(tokens.shape[0], -1)
         output = self.output(h)
         return output
 
 class Packet_Encoder(nn.Module):
     def __init__(   self, 
-                    params: ModelParams,
+                    params: EncoderParams,
                     embedding: nn.Module = None,
                     BackBone: nn.Module = None,
                     Pooling: nn.Module = None):
@@ -233,24 +229,22 @@ class Packet_Encoder(nn.Module):
         self.device = device
         
         if embedding is None:
-            self.embedding = nn.Embedding(vocab_size, embedding_dim).to(device)
+            self.embedding = nn.Embedding(params.vocab_size, params.embedding_dim).to(device)
         else:
             self.embedding = embedding.to(device)
         
-        if BackBone is None:
-            self.BackBone = Mamba(
-                    d_model=embedding_dim,
-                    d_state=16,
-                    d_conv=4,
-                    expand=2
-                ).to(device)
+        if BackBone == None:
+            if params.BackboneType == "Transformer":
+                self.Backbone = TransformerBackbone(params.BackboneParams)
+            if params.BackboneType == "Mamba":
+                self.Backbone = MambaBackbone(params.BackboneParams)
+            else:
+                raise Exception("Backbone Type is not supported")
         else:
-            self.BackBone = BackBone.to(device)
+            self.Backbone = BackBone
 
         if Pooling is None:
-            assert embedding_dim == latent_dim, "Embedding and latent dimensions must match for default pooling."
-            assert latent_len == input_len, "Input and latent lengths must match for default pooling."
-            self.Pooler = nn.Identity()
+            self.CLS_Pooling = DynamicCLSPooling(params.CLS_ID)
         else:
             self.Pooler = Pooling.to(device)
 
@@ -265,7 +259,7 @@ class Packet_Encoder(nn.Module):
             torch.Tensor: The compressed latent representation.
         """
         h = self.embedding(tokens)
-        h = self.BackBone(h)
+        h = self.Backbone(h)
         h = self.Pooler(h, tokens)
         return h
 
@@ -278,7 +272,7 @@ class AutoregressiveDecoder(nn.Module):
     is used by shifting the ground truth tokens and prepending the CLS
     embedding. During inference, tokens are generated one at a time.
 
-    Args:
+    Args(Packed in AutoEncoderParams):
         vocab_size:     Size of the token vocabulary.
         embedding_dim:  Dimensionality of token embeddings (must match the
                         CLS embedding and backbone ``d_model``).
@@ -292,16 +286,24 @@ class AutoregressiveDecoder(nn.Module):
         device:         Device to place all sub-modules on.
     """
 
-    def __init__(self, vocab_size: int, embedding_dim: int, max_len: int,
-                 Backbone: nn.Module, bos_token_id: int, device: torch.device):
+    def __init__(self, params: AutoEncoderParams, Backbone=None):
         super().__init__()
-        self.max_len = max_len
-        self.bos_token_id = bos_token_id
+        embedding_dim = params.ENC_Params.EncoderDim
+        vocab_size = params.ENC_Params.vocab_size
+        self.max_len = params.ENC_Params.packet_id_len
+        self.bos_token_id = params.ENC_Params.SpecialTokens["<BOS>"]
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.cls_proj = nn.Linear(embedding_dim, embedding_dim)
-        self.Backbone = Backbone
+        if Backbone == None:
+            if params.DecBackboneType == "Transformer":
+                self.Backbone = TransformerBackbone(params.DecBackbone)
+            if params.DecBackboneType == "Mamba":
+                self.Backbone = MambaBackbone(params.DecBackbone)
+            else:
+                raise Exception("Backbone Type is not supported")
+        else:
+            self.Backbone = Backbone
         self.output_head = nn.Linear(embedding_dim, vocab_size, bias=False)
-        self.to(device)
 
     def _build_decoder_input(self, cls_embedding: torch.Tensor, tokens: torch.Tensor = None) -> torch.Tensor:
         """Prepend the projected CLS embedding to the token embeddings.
@@ -417,31 +419,21 @@ class PacketAutoencoder(nn.Module):
                         ``latent_len``, ``input_len``).
     """
 
-    def __init__(self, vocab_size: int, embedding_dim: int, max_len: int,
-                 decoder_backbone: nn.Module, bos_token_id: int,
-                 device: torch.device, encoder: nn.Module = None,
-                 **encoder_kwargs):
+    def __init__(self, 
+                params: AutoEncoderParams,
+                decoder: nn.Module = None,
+                encoder: nn.Module = None):
         super().__init__()
 
         if encoder is not None:
             self.encoder = encoder
         else:
-            self.encoder = Packet_Encoder(
-                vocab_size=vocab_size,
-                embedding_dim=embedding_dim,
-                device=device,
-                **encoder_kwargs,
-            )
+            self.encoder = Packet_Encoder(params.ENC_Params)
 
-        self.decoder = AutoregressiveDecoder(
-            vocab_size=vocab_size,
-            embedding_dim=embedding_dim,
-            max_len=max_len,
-            Backbone=decoder_backbone,
-            bos_token_id=bos_token_id,
-            device=device,
-        )
-        self.to(device)
+        if decoder is not None:
+            self.decoder = decoder
+        else:
+            self.decoder = AutoregressiveDecoder(params)
 
     def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Training forward pass with teacher forcing.
@@ -608,7 +600,7 @@ if __name__ == "__main__":
     backboneparams = MambaBackboneParams(
         dim=32
     )
-    params = ModelParams(
+    params = MLM_Params(
         vocab_size=262,
         EncoderDim=32,
         packet_id_len=1520,

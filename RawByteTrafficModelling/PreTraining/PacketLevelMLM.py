@@ -1,4 +1,4 @@
-from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  ModelParams, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone, AutoregressiveDecoder
+from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  EncoderParams, MLM_Params, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone, AutoregressiveDecoder
 from RawByteTrafficModelling.ModelComponents.BackBones import MambaBackboneParams, TransformerBackboneParams
 from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder, PreTrainingDatasetHandler
 import polars as pl
@@ -8,7 +8,7 @@ from sklearn.preprocessing import OneHotEncoder
 import numpy as np
 import torch.nn as nn
 import logging
-from RawByteTrafficModelling.ModelComponents.ModelDefinitions import save_checkpoint, load_checkpoint
+from RawByteTrafficModelling.ModelComponents.ModelDefinitions import save_checkpoint
 
 output_dir = "RawByteTrafficModelling/PreTraining/TrainingOutputs/test"
 
@@ -53,22 +53,23 @@ assert device == torch.device("cuda")
 # Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
 
 # --- Model Config ---
-params = ModelParams(### Encoder Params
+ENCparams = EncoderParams(
     vocab_size=262,
     EncoderDim=32,
     packet_id_len=1520,
     pooling_type="DynamicCLS",
-    EncoderBackboneType="Mamba",
-    EncoderBackboneParams=MambaBackboneParams(dim=32),
+    BackboneType="Mamba",
+    BackboneParams=MambaBackboneParams(dim=32),
     CLS_ID=SpecialIDs["<CLS>"],
+    SpecialTokens=SpecialIDs
+    )
+
+MLM_params = MLM_Params(
+    EncoderParams=ENCparams,
     NumCLSclasses=ProtoHierarchyEncodings.shape[1], ### MLM Params
-    NumAttackClasses=14, ### General Classification Params
-    PacketSequenceLength=64, ## Sequence Params
-    SeqClassifierDim=32)
+    )
 
-
-MaskedLanguageModel = Packet_MLM(params
-                                ).to(device)
+MaskedLanguageModel = Packet_MLM(MLM_params).to(device)
 
 loss_fct = nn.CrossEntropyLoss()
 
@@ -80,9 +81,9 @@ unselectable_token_ids = [DataHandler.InputIDEncoder.SpecialIDs["</s>"],
                         DataHandler.InputIDEncoder.SpecialIDs["<EndPointMasking>"]]
 
 
-Masker = MaskedLMMaskGenerator( vocabulary_size = params.vocab_size, 
+Masker = MaskedLMMaskGenerator( vocabulary_size = MLM_params.EncoderParams.vocab_size, 
                                 mask_token_id = DataHandler.InputIDEncoder.SpecialIDs["<mask>"], 
-                                mask_selection_length=params.packet_id_len*0.25, 
+                                mask_selection_length=MLM_params.EncoderParams.packet_id_len*0.25, 
                                 mask_selection_rate=0.10,
                                 mask_token_rate=0.9,
                                 random_token_rate=0.1,
@@ -143,5 +144,5 @@ for epoch in range(Epochs):
             
 MaskedLanguageModel_path = f"{output_dir}/PacketLevelMLM_EdgeIIoT.pth"
 # torch.save(MaskedLanguageModel.state_dict(), MaskedLanguageModel_path)
-save_checkpoint(MaskedLanguageModel, optimizer, epoch, loss, params, MaskedLanguageModel_path)
+save_checkpoint(MaskedLanguageModel, optimizer, epoch, loss, MLM_params, MaskedLanguageModel_path)
 logger.info(f"Saved MaskedLanguageModel to {MaskedLanguageModel_path}")
