@@ -56,7 +56,7 @@ class AutoEncoderParams:
     DecBackbone: BackboneParams
     bos_token_id: int
 
-def load_AE_params(path: str, device='cpu'):
+def load_AE_Checkpoint(path: str, device='cpu'):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     config = AutoEncoderParams(**ckpt['config'])
     config.ENC_Params = unpack_encoder_params(config.ENC_Params)
@@ -229,7 +229,7 @@ class Packet_Encoder(nn.Module):
         self.device = device
         
         if embedding is None:
-            self.embedding = nn.Embedding(params.vocab_size, params.embedding_dim).to(device)
+            self.embedding = nn.Embedding(params.vocab_size, params.EncoderDim).to(device)
         else:
             self.embedding = embedding.to(device)
         
@@ -244,9 +244,9 @@ class Packet_Encoder(nn.Module):
             self.Backbone = BackBone
 
         if Pooling is None:
-            self.CLS_Pooling = DynamicCLSPooling(params.CLS_ID)
+            self.Pooling = DynamicCLSPooling(params.CLS_ID)
         else:
-            self.Pooler = Pooling.to(device)
+            self.Pooling = Pooling.to(device)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         """
@@ -260,7 +260,7 @@ class Packet_Encoder(nn.Module):
         """
         h = self.embedding(tokens)
         h = self.Backbone(h)
-        h = self.Pooler(h, tokens)
+        h = self.Pooling(h, tokens)
         return h
 
 

@@ -1,4 +1,4 @@
-from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  MLM_Params, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone, AutoregressiveDecoder, PacketAutoencoder
+from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  MLM_Params, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone, AutoregressiveDecoder, PacketAutoencoder, load_AE_Checkpoint
 from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder, PreTrainingDatasetHandler
 import polars as pl
 import torch
@@ -10,7 +10,7 @@ import logging
 import torch.nn.functional as F
 import os
 
-output_dir = "RawByteTrafficModelling/AnomalyDetection/Outputs"
+output_dir = "RawByteTrafficModelling/AnomalyDetection/Outputs/test"
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -44,46 +44,52 @@ ProtoHierarchyEncodings = ProtoHierarchyEncoder.fit_transform(DataHandler.data["
 
 device = torch.device("cuda")
 assert device == torch.device("cuda")
+AEpath = '/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/test/PacketLevelAutoEncoder_EdgeIIoT.ckpt'
+AEparams, ckpt = load_AE_Checkpoint(AEpath)
+
+AE_model = PacketAutoencoder(AEparams)
+AE_model.load_state_dict(ckpt['model_state_dict'])
+AE_model = AE_model.to(device)
 
 
 # Backbone = TransformerBackbone(d_model=emb_dim, nhead=4, num_layers=2, max_len=1520).to(device)
-Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
+# Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
 
-MaskedLanguageModel = Packet_MLM(vocab_size=vocab_size, 
-                                embedding_dim=emb_dim, 
-                                num_CLS_classes=ProtoHierarchyEncodings.shape[1],
-                                CLS_Pooling = DynamicCLSPooling(DataHandler.InputIDEncoder.SpecialIDs["<CLS>"]),
-                                Backbone=Backbone,
-                                device=device)
+# MaskedLanguageModel = Packet_MLM(vocab_size=vocab_size, 
+#                                 embedding_dim=emb_dim, 
+#                                 num_CLS_classes=ProtoHierarchyEncodings.shape[1],
+#                                 CLS_Pooling = DynamicCLSPooling(DataHandler.InputIDEncoder.SpecialIDs["<CLS>"]),
+#                                 Backbone=Backbone,
+#                                 device=device)
 
 
-PacketEncoder = Packet_Encoder(vocab_size=vocab_size,
-                                embedding_dim=emb_dim,
-                                input_len=bytes_per_packet,
-                                latent_dim=emb_dim,
-                                device=device,
-                                embedding=MaskedLanguageModel.embedding,
-                                BackBone=MaskedLanguageModel.Backbone,
-                                Pooling=MaskedLanguageModel.CLS_Pooling).to(device)
+# PacketEncoder = Packet_Encoder(vocab_size=vocab_size,
+#                                 embedding_dim=emb_dim,
+#                                 input_len=bytes_per_packet,
+#                                 latent_dim=emb_dim,
+#                                 device=device,
+#                                 embedding=MaskedLanguageModel.embedding,
+#                                 BackBone=MaskedLanguageModel.Backbone,
+#                                 Pooling=MaskedLanguageModel.CLS_Pooling).to(device)
 
-DecoderBackbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
-Decoder = AutoregressiveDecoder(vocab_size=vocab_size,
-                                embedding_dim=emb_dim,
-                                max_len=bytes_per_packet,
-                                Backbone=DecoderBackbone,
-                                bos_token_id=DataHandler.InputIDEncoder.SpecialIDs["<BOS>"],
-                                device=device)
+# DecoderBackbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
+# Decoder = AutoregressiveDecoder(vocab_size=vocab_size,
+#                                 embedding_dim=emb_dim,
+#                                 max_len=bytes_per_packet,
+#                                 Backbone=DecoderBackbone,
+#                                 bos_token_id=DataHandler.InputIDEncoder.SpecialIDs["<BOS>"],
+#                                 device=device)
 
-AutoEncoder = PacketAutoencoder(vocab_size=vocab_size,
-                                embedding_dim=emb_dim,
-                                max_len=bytes_per_packet,
-                                decoder_backbone=DecoderBackbone,
-                                bos_token_id=DataHandler.InputIDEncoder.SpecialIDs["<BOS>"],
-                                device=device,
-                                encoder=PacketEncoder,
-)
+# AutoEncoder = PacketAutoencoder(vocab_size=vocab_size,
+#                                 embedding_dim=emb_dim,
+#                                 max_len=bytes_per_packet,
+#                                 decoder_backbone=DecoderBackbone,
+#                                 bos_token_id=DataHandler.InputIDEncoder.SpecialIDs["<BOS>"],
+#                                 device=device,
+#                                 encoder=PacketEncoder,
+# )
 
-AutoEncoder.load_state_dict(torch.load(f"/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketLevelAutoEncoder_EdgeIIoT.pth"))
+# AutoEncoder.load_state_dict(torch.load(f"/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketLevelAutoEncoder_EdgeIIoT.pth"))
 
 loss_fct = nn.CrossEntropyLoss()
 
@@ -96,7 +102,7 @@ with torch.no_grad():
         input_ids = DataHandler.InputIDEncoder.construct_input_ids(bytes)
         input_ids = torch.tensor(input_ids, dtype=torch.long).to(device)
         #Perform Forward Pass
-        logits, latent = AutoEncoder(input_ids)
+        logits, latent = AE_model(input_ids)
         loss = F.cross_entropy(logits.reshape(-1, vocab_size), input_ids.reshape(-1))
 
         predictions = torch.argmax(logits, dim=-1)
@@ -127,7 +133,7 @@ for file in attack_files:
             input_ids = AttackHandler.InputIDEncoder.construct_input_ids(bytes)
             input_ids = torch.tensor(input_ids, dtype=torch.long).to(device)
             #Perform Forward Pass
-            logits, latent = AutoEncoder(input_ids)
+            logits, latent = AE_model(input_ids)
             loss = F.cross_entropy(logits.reshape(-1, vocab_size), input_ids.reshape(-1))
 
             predictions = torch.argmax(logits, dim=-1)
