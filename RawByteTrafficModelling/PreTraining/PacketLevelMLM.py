@@ -10,21 +10,21 @@ import torch.nn as nn
 import logging
 from RawByteTrafficModelling.ModelComponents.ModelDefinitions import save_checkpoint
 
-output_dir = "RawByteTrafficModelling/PreTraining/TrainingOutputs/test"
+output_dir = "RawByteTrafficModelling/PreTraining/TrainingOutputs/CICAPT-IIoT_64"
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(f'{output_dir}/PacketLevelMLM_EdgeIIoT.log'),
+        logging.FileHandler(f'{output_dir}/PacketLevelMLM.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
 ### Set Training Parameters
-Epochs = 1
+Epochs = 3
 
 batch_size = 128
 
@@ -33,21 +33,27 @@ learning_rate = 8e-4
 alpha_proto = 4
 alpha_reconstruction = 1
 
-data = pl.read_parquet("/home/plb41586/workspace/data_artefacts/IIoTset-Ferrag/NormalMerged.parquet")
-logger.info(data.head())
+test_every_n_batches = 50
+
+### Load data
+train_data = pl.read_parquet("data_artefacts/CICAPT-IIoT/Phase1_split/train.parquet")
+test_data = pl.read_parquet("data_artefacts/CICAPT-IIoT/Phase1_split/test.parquet")
+logger.info(train_data.head())
+logger.info(train_data.shape)
+logger.info(test_data.shape)
 
 # CLS (Classify) token replaces Start Of Sequence  token
 SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259, "<EndPointMasking>": 260, "<BOS>": 261}
 ID_Encoder = ID_Encoder(SpecialIDs=SpecialIDs, CLS_Placement="EOS")
-DataHandler = PreTrainingDatasetHandler(data, 1, ID_Encoder)
+DataHandler = PreTrainingDatasetHandler(train_data, 1, ID_Encoder)
+TestDataHandler = PreTrainingDatasetHandler(test_data, 1, ID_Encoder)
 
 # Init Label ProtoHierarchy Encoder
 ProtoHierarchyEncoder = OneHotEncoder(sparse_output=False, dtype=np.float32)
 ProtoHierarchyEncodings = ProtoHierarchyEncoder.fit_transform(DataHandler.data["proto_hierarchy"].unique().to_numpy().reshape(-1, 1))
 
 
-device = torch.device("cuda")
-assert device == torch.device("cuda")
+device = torch.device("cuda:0")
 
 # Backbone = TransformerBackbone(d_model=emb_dim, nhead=4, num_layers=2, max_len=1520).to(device)
 # Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
@@ -55,11 +61,11 @@ assert device == torch.device("cuda")
 # --- Model Config ---
 ENCparams = EncoderParams(
     vocab_size=262,
-    EncoderDim=32,
+    EncoderDim=64,
     packet_id_len=1520,
     pooling_type="DynamicCLS",
     BackboneType="Mamba",
-    BackboneParams=MambaBackboneParams(dim=32),
+    BackboneParams=MambaBackboneParams(dim=64),
     CLS_ID=SpecialIDs["<CLS>"],
     SpecialTokens=SpecialIDs
     )
@@ -134,15 +140,74 @@ for epoch in range(Epochs):
         logger.info(f"Reconstruction Loss: {reconstruction_loss} Reconstruction Accuracy: {reconstruction_accuracy}")
         logger.info(f"ProtoHierarchy Loss: {proto_hierarchyloss} ProtoHierarchy Accuracy: {CLS_accuracy}")
 
-        break # just for testing
+        # ========================
+        # TEST EVALUATION (every N batches)
+        # ========================
+        if (index + 1) % test_every_n_batches == 0:
+            MaskedLanguageModel.eval()
+            test_batches = TestDataHandler.sample_epoch_packet_indices(batch_size)
+            test_total_loss = 0.0
+            test_reconstruction_loss_sum = 0.0
+            test_proto_loss_sum = 0.0
+            test_reconstruction_correct = 0
+            test_reconstruction_total = 0
+            test_cls_correct = 0
+            test_cls_total = 0
+
+            with torch.no_grad():
+                for test_batch in test_batches:
+                    bytes, proto_hierarchy = TestDataHandler.get_pretraining_data(test_batch)
+                    input_ids = TestDataHandler.InputIDEncoder.construct_input_ids(bytes)
+                    masked_ids = Masker(input_ids)
+                    masked_ids = np.array([masked_ids["token_ids"]]).squeeze()
+                    masked_ids = torch.tensor(masked_ids, dtype=torch.long).to(device)
+
+                    reconstruction_logits, CLS_logits = MaskedLanguageModel(masked_ids)
+
+                    proto_label_encodings = ProtoHierarchyEncoder.transform(np.array(proto_hierarchy).reshape(-1, 1))
+                    proto_label_encodings = torch.tensor(proto_label_encodings, dtype=torch.float32).to(device)
+                    proto_hierarchyloss = loss_fct(CLS_logits, torch.argmax(proto_label_encodings, dim=-1))
+
+                    mask_token_id = TestDataHandler.InputIDEncoder.SpecialIDs["<mask>"]
+                    mask_token_indices = (masked_ids == mask_token_id)
+                    masked_logits = reconstruction_logits[mask_token_indices].to(device)
+                    input_ids = torch.tensor(input_ids, dtype=torch.long).to(device)
+                    masked_labels = input_ids[mask_token_indices]
+                    reconstruction_loss = loss_fct(masked_logits, masked_labels)
+
+                    test_loss = alpha_proto * proto_hierarchyloss + alpha_reconstruction * reconstruction_loss
+                    test_total_loss += test_loss.item()
+                    test_reconstruction_loss_sum += reconstruction_loss.item()
+                    test_proto_loss_sum += proto_hierarchyloss.item()
+
+                    predictions = torch.argmax(masked_logits, dim=-1)
+                    test_reconstruction_correct += (predictions == masked_labels).sum().item()
+                    test_reconstruction_total += masked_labels.numel()
+
+                    CLS_predictions = torch.argmax(CLS_logits, dim=-1)
+                    cls_labels = torch.argmax(proto_label_encodings, dim=-1)
+                    test_cls_correct += (CLS_predictions == cls_labels).sum().item()
+                    test_cls_total += cls_labels.numel()
+                    break
+
+            num_test_batches = len(test_batches)
+            test_reconstruction_accuracy = test_reconstruction_correct / test_reconstruction_total if test_reconstruction_total > 0 else 0.0
+            test_cls_accuracy = test_cls_correct / test_cls_total if test_cls_total > 0 else 0.0
+
+            logger.info(f"===== Test Results (Epoch {epoch+1}, Batch {index+1}) =====")
+            logger.info(f"Test Total Loss: {test_total_loss / num_test_batches:.4f}")
+            logger.info(f"Test Reconstruction Loss: {test_reconstruction_loss_sum / num_test_batches:.4f} "
+                        f"Test Reconstruction Accuracy: {test_reconstruction_accuracy:.4f}")
+            logger.info(f"Test ProtoHierarchy Loss: {test_proto_loss_sum / num_test_batches:.4f} "
+                        f"Test ProtoHierarchy Accuracy: {test_cls_accuracy:.4f}")
+
         if reconstruction_accuracy > 0.45 and CLS_accuracy > 0.80 and batch_size < 2048:
             logger.info("Increasing Batch Size")
-            batch_size = 2048
-            learning_rate = learning_rate * 10
+            batch_size = 1024
+            learning_rate = learning_rate * 5
             optimizer.param_groups[0]['lr'] = learning_rate
             break
-            
-MaskedLanguageModel_path = f"{output_dir}/PacketLevelMLM_EdgeIIoT.pth"
-# torch.save(MaskedLanguageModel.state_dict(), MaskedLanguageModel_path)
-save_checkpoint(MaskedLanguageModel, optimizer, epoch, loss, MLM_params, MaskedLanguageModel_path)
-logger.info(f"Saved MaskedLanguageModel to {MaskedLanguageModel_path}")
+
+    MaskedLanguageModel_path = f"{output_dir}/PacketLevelMLM_EdgeIIoT_E{epoch}.pth"
+    save_checkpoint(MaskedLanguageModel, optimizer, epoch, loss, MLM_params, MaskedLanguageModel_path)
+    logger.info(f"Saved MaskedLanguageModel to {MaskedLanguageModel_path}")

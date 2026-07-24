@@ -42,7 +42,7 @@ DataHandler = PreTrainingDatasetHandler(data, 1, ID_Encoder)
 ProtoHierarchyEncoder = OneHotEncoder(sparse_output=False, dtype=np.float32)
 ProtoHierarchyEncodings = ProtoHierarchyEncoder.fit_transform(DataHandler.data["proto_hierarchy"].unique().to_numpy().reshape(-1, 1))
 
-device = torch.device("cuda")
+device = torch.device("cuda:0")
 assert device == torch.device("cuda")
 AEpath = '/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/test/PacketLevelAutoEncoder_EdgeIIoT.ckpt'
 AEparams, ckpt = load_AE_Checkpoint(AEpath)
@@ -50,46 +50,6 @@ AEparams, ckpt = load_AE_Checkpoint(AEpath)
 AE_model = PacketAutoencoder(AEparams)
 AE_model.load_state_dict(ckpt['model_state_dict'])
 AE_model = AE_model.to(device)
-
-
-# Backbone = TransformerBackbone(d_model=emb_dim, nhead=4, num_layers=2, max_len=1520).to(device)
-# Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
-
-# MaskedLanguageModel = Packet_MLM(vocab_size=vocab_size, 
-#                                 embedding_dim=emb_dim, 
-#                                 num_CLS_classes=ProtoHierarchyEncodings.shape[1],
-#                                 CLS_Pooling = DynamicCLSPooling(DataHandler.InputIDEncoder.SpecialIDs["<CLS>"]),
-#                                 Backbone=Backbone,
-#                                 device=device)
-
-
-# PacketEncoder = Packet_Encoder(vocab_size=vocab_size,
-#                                 embedding_dim=emb_dim,
-#                                 input_len=bytes_per_packet,
-#                                 latent_dim=emb_dim,
-#                                 device=device,
-#                                 embedding=MaskedLanguageModel.embedding,
-#                                 BackBone=MaskedLanguageModel.Backbone,
-#                                 Pooling=MaskedLanguageModel.CLS_Pooling).to(device)
-
-# DecoderBackbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
-# Decoder = AutoregressiveDecoder(vocab_size=vocab_size,
-#                                 embedding_dim=emb_dim,
-#                                 max_len=bytes_per_packet,
-#                                 Backbone=DecoderBackbone,
-#                                 bos_token_id=DataHandler.InputIDEncoder.SpecialIDs["<BOS>"],
-#                                 device=device)
-
-# AutoEncoder = PacketAutoencoder(vocab_size=vocab_size,
-#                                 embedding_dim=emb_dim,
-#                                 max_len=bytes_per_packet,
-#                                 decoder_backbone=DecoderBackbone,
-#                                 bos_token_id=DataHandler.InputIDEncoder.SpecialIDs["<BOS>"],
-#                                 device=device,
-#                                 encoder=PacketEncoder,
-# )
-
-# AutoEncoder.load_state_dict(torch.load(f"/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketLevelAutoEncoder_EdgeIIoT.pth"))
 
 loss_fct = nn.CrossEntropyLoss()
 

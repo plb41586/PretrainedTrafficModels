@@ -74,7 +74,7 @@ def save_checkpoint(model, optimizer, epoch, loss, config, path: str):
     }, path)
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class DynamicCLSPooling(nn.Module):
     """
@@ -226,12 +226,11 @@ class Packet_Encoder(nn.Module):
                     BackBone: nn.Module = None,
                     Pooling: nn.Module = None):
         super().__init__()
-        self.device = device
         
         if embedding is None:
-            self.embedding = nn.Embedding(params.vocab_size, params.EncoderDim).to(device)
+            self.embedding = nn.Embedding(params.vocab_size, params.EncoderDim)
         else:
-            self.embedding = embedding.to(device)
+            self.embedding = embedding
         
         if BackBone == None:
             if params.BackboneType == "Transformer":
@@ -246,7 +245,7 @@ class Packet_Encoder(nn.Module):
         if Pooling is None:
             self.Pooling = DynamicCLSPooling(params.CLS_ID)
         else:
-            self.Pooling = Pooling.to(device)
+            self.Pooling = Pooling
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         """
@@ -283,7 +282,6 @@ class AutoregressiveDecoder(nn.Module):
                         causal masking if using a Transformer backbone.
         bos_token_id:   Beginning-of-sequence token id used to seed
                         autoregressive inference.
-        device:         Device to place all sub-modules on.
     """
 
     def __init__(self, params: AutoEncoderParams, Backbone=None):
