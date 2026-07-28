@@ -1,4 +1,4 @@
-from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  MLM_Params, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone, AutoregressiveDecoder, PacketAutoencoder, AutoEncoderParams, save_checkpoint
+from RawByteTrafficModelling.ModelComponents.ModelDefinitions import EncoderParams, Packet_Encoder, PacketAutoencoder, AutoEncoderParams, save_checkpoint
 from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder, PreTrainingDatasetHandler
 from RawByteTrafficModelling.ModelComponents.BackBones import TransformerBackbone, TransformerBackboneParams, MambaBackbone, MambaBackboneParams
 import polars as pl
@@ -11,18 +11,31 @@ import logging
 import torch.nn.functional as F
 from RawByteTrafficModelling.ModelComponents.ModelDefinitions import load_MLM_checkpoint
 
-MLMparams, ckpt = load_MLM_checkpoint("/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/test/PacketLevelMLM_EdgeIIoT.pth")
+# MLMparams, ckpt = load_MLM_checkpoint("/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_64/PacketLevelMLM_EdgeIIoT_E2.pth")
 
-MaskedLanguageModel = Packet_MLM(MLMparams) 
+# MaskedLanguageModel = Packet_MLM(MLMparams) 
 
-MaskedLanguageModel.load_state_dict(ckpt['model_state_dict'])
+# MaskedLanguageModel.load_state_dict(ckpt['model_state_dict'])
 
-bos_token_id = MLMparams.EncoderParams.SpecialTokens['<BOS>']
+# bos_token_id = MLMparams.EncoderParams.SpecialTokens['<BOS>']
 
-autoencoderparams = AutoEncoderParams(ENC_Params=MLMparams.EncoderParams,
+SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259, "<EndPointMasking>": 260, "<BOS>": 261}
+
+encoder_params = EncoderParams(
+    vocab_size=262,
+    EncoderDim=64,
+    packet_id_len=1520,
+    pooling_type="DynamicCLS",
+    BackboneType="Mamba",
+    BackboneParams=MambaBackboneParams(dim=64),
+    CLS_ID=SpecialIDs["<CLS>"],
+    SpecialTokens=SpecialIDs
+    )
+
+autoencoderparams = AutoEncoderParams(ENC_Params=encoder_params,
                                       DecBackboneType="Mamba",
-                                      DecBackbone=MambaBackboneParams(dim=MLMparams.EncoderParams.EncoderDim),
-                                      bos_token_id=MLMparams.EncoderParams.SpecialTokens['<BOS>'])
+                                      DecBackbone=MambaBackboneParams(dim=encoder_params.EncoderDim),
+                                      bos_token_id=encoder_params.SpecialTokens['<BOS>'])
 
 output_dir = "RawByteTrafficModelling/PreTraining/TrainingOutputs/test"
 # Configure logging
@@ -37,7 +50,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ### Set Training Parameters
-Epochs = 1
+Epochs = 3
 learning_rate = 8e-4
 batch_size = 128
 
@@ -59,10 +72,7 @@ assert device == torch.device("cuda")
 # Backbone = TransformerBackbone(d_model=emb_dim, nhead=4, num_layers=2, max_len=1520).to(device)
 # Backbone = MambaBackbone(d_model=emb_dim, num_layers=2, d_state=16, d_conv=4, expand=2).to(device)
 
-PacketEncoder = Packet_Encoder(params=MLMparams,
-                                embedding=MaskedLanguageModel.embedding,
-                                BackBone=MaskedLanguageModel.Backbone,
-                                Pooling=MaskedLanguageModel.CLS_Pooling)
+PacketEncoder = Packet_Encoder(params=autoencoderparams.ENC_Params)
 
 AutoEncoder = PacketAutoencoder(params = autoencoderparams,
                                 encoder=PacketEncoder
@@ -73,10 +83,14 @@ loss_fct = nn.CrossEntropyLoss()
 
 optimizer = torch.optim.AdamW(AutoEncoder.parameters(), lr=learning_rate, weight_decay=1e-2)
 
-unselectable_token_ids = [DataHandler.InputIDEncoder.SpecialIDs["</s>"], 
-                        DataHandler.InputIDEncoder.SpecialIDs["<pad>"],
-                        DataHandler.InputIDEncoder.SpecialIDs["<CLS>"],
-                        DataHandler.InputIDEncoder.SpecialIDs["<EndPointMasking>"]]
+AutoEncoderModel_path = f"{output_dir}/PacketLevelAutoEncoder_EdgeIIoT_untrained.ckpt"
+save_checkpoint(model=AutoEncoder,
+                optimizer=optimizer,
+                epoch=-1,
+                loss=0,
+                config=autoencoderparams,
+                path=AutoEncoderModel_path)
+logger.info(f"Saved MaskedLanguageModel to {AutoEncoderModel_path}")
 
 for epoch in range(Epochs):
     batches = DataHandler.sample_epoch_packet_indices(batch_size)
@@ -100,19 +114,17 @@ for epoch in range(Epochs):
         logger.info(f"Pretraining Batch {index}/{len(batches)}")
         logger.info(f"Total Loss: {loss.item()}")
         logger.info(f"Reconstruction Loss: {loss} Reconstruction Accuracy: {reconstruction_accuracy}")
-        break
-        # if reconstruction_accuracy > 0.45 and CLS_accuracy > 0.80 and batch_size < 2048:
-        #     logger.info("Increasing Batch Size")
-        #     batch_size = 2048
-        #     learning_rate = learning_rate * 10
-        #     optimizer.param_groups[0]['lr'] = learning_rate
-        #     break
+        if reconstruction_accuracy > 0.45 and batch_size < 1024:
+            logger.info("Increasing Batch Size")
+            batch_size = 1024
+            learning_rate = learning_rate * 5
+            optimizer.param_groups[0]['lr'] = learning_rate
             
-AutoEncoderModel_path = f"{output_dir}/PacketLevelAutoEncoder_EdgeIIoT.ckpt"
-save_checkpoint(model=AutoEncoder,
-                optimizer=optimizer,
-                epoch=epoch,
-                loss=loss,
-                config=autoencoderparams,
-                path=AutoEncoderModel_path)
-logger.info(f"Saved MaskedLanguageModel to {AutoEncoderModel_path}")
+    AutoEncoderModel_path = f"{output_dir}/PacketLevelAutoEncoder_EdgeIIoT_E{epoch}.ckpt"
+    save_checkpoint(model=AutoEncoder,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    loss=loss,
+                    config=autoencoderparams,
+                    path=AutoEncoderModel_path)
+    logger.info(f"Saved MaskedLanguageModel to {AutoEncoderModel_path}")

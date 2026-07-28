@@ -10,7 +10,7 @@ import logging
 import torch.nn.functional as F
 import os
 
-output_dir = "RawByteTrafficModelling/AnomalyDetection/Outputs/PacketEmbeddingsMLM"
+output_dir = "RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/PacketEmbeddings_AutoEncoder/Untrained"
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -25,33 +25,29 @@ logger = logging.getLogger(__name__)
 
 device = torch.device("cuda:0")
 
-AEpath = '/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/test/PacketLevelAutoEncoder_EdgeIIoT.ckpt'
-MLM_Path = '/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/test/PacketLevelMLM_EdgeIIoT.pth'
+AEpath = '/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_AutoEncoder/PacketLevelAutoEncoder_EdgeIIoT_untrained.ckpt'
+AEparams, ckpt = load_AE_Checkpoint(AEpath)
+AE_model = PacketAutoencoder(AEparams)
+AE_model.load_state_dict(ckpt['model_state_dict'])
+vocab_size = AEparams.ENC_Params.vocab_size
+packet_encoder_model = AE_model.encoder
+packet_encoder_model.to(device)
 
-# AEparams, ckpt = load_AE_Checkpoint(AEpath)
-MLMparams, ckpt = load_MLM_checkpoint(MLM_Path)
-
-# AE_model = PacketAutoencoder(AEparams)
-# AE_model.load_state_dict(ckpt['model_state_dict'])
-MLM_model = Packet_MLM(MLMparams)
-MLM_model.load_state_dict(ckpt['model_state_dict'])
+# MLM_Path = '/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_64/PacketLevelMLM_EdgeIIoT_E2.pth'
+# MLMparams, ckpt = load_MLM_checkpoint(MLM_Path)
+# MLM_model = Packet_MLM(MLMparams)
+# MLM_model.load_state_dict(ckpt['model_state_dict'])
+# vocab_size = MLMparams.EncoderParams.vocab_size
+# packet_encoder_model = Packet_Encoder(embedding=MLM_model.embedding, BackBone=MLM_model.Backbone, params=MLMparams.EncoderParams)
+# packet_encoder_model = packet_encoder_model.to(device)
 
 loss_fct = nn.CrossEntropyLoss()
-
 losses = []
-
-# --- Model Config ---
-# vocab_size = AEparams.ENC_Params.vocab_size
-vocab_size = MLMparams.EncoderParams.vocab_size
 batch_size = 1024
-
 
 # CLS (Classify) token replaces Start Of Sequence  token
 ID_Encoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259, "<EndPointMasking>": 260, "<BOS>": 261}, CLS_Placement="EOS")
 
-# packet_encoder_model = AE_model.encoder
-packet_encoder_model = Packet_Encoder(embedding=MLM_model.embedding, BackBone=MLM_model.Backbone, params=MLMparams.EncoderParams)
-packet_encoder_model = packet_encoder_model.to(device)
 
 attack_dir = 'data_artefacts/IIoTset-Ferrag/attacks'
 attack_files = os.listdir(attack_dir)
