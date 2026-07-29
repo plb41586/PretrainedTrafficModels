@@ -594,6 +594,32 @@ class PreTrainingDatasetHandler():
         
         return packet_sequence
 
+    def sample_flow_batch(self, batch_size: int) -> list[pl.DataFrame]:
+        """
+        Sample `batch_size` flows and return one time-ordered packet window
+        (up to self.seq_len packets) per flow. Used to build inputs for
+        sequence-level (auto)encoder training, where a "sample" is a flow
+        rather than an individual packet.
+
+        input:
+            batch_size: The batch size.
+        output:
+            batch_data: A list of packet sequences in polars DataFrame format,
+                        each sorted by (timestamp_s, timestamp_us).
+        """
+        flow_keys = self.data["flow_key"].unique().to_list()
+        flow_picks = np.random.choice(flow_keys, batch_size)
+
+        def process_flow(flow_key):
+            flow_df = self.data.filter(pl.col("flow_key") == flow_key) \
+                                .sort(["timestamp_s", "timestamp_us"])
+            return self.get_packet_sequence_from_df(flow_df, self.seq_len)
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            batch_data = list(executor.map(process_flow, flow_picks))
+
+        return batch_data
+
     def sample_epoch_packet_indices(self, batch_size: int):
         """
         Sample batches of packets from the training data randomly.
@@ -665,30 +691,30 @@ class PreTrainingDatasetHandler():
         """
         Retrieve the 'data' column as a NumPy array for the entire DataFrame.
         Retrieve the 'mask' column and apply it to data.
-        And return the label assuming all rows have the same label.
-        
+        And return the flow_key, since all rows of a sequence share one flow.
+
         Args:
             df (pl.DataFrame): The Polars DataFrame containing the 'data' column.
-        
+
         Returns:
             list: A list of NumPy arrays containing all 'data' values.
-            label: The label of the data as string
+            label: The flow_key of the sequence, as a string
         """
         selected = df["data"].to_numpy()
         masks = df["mask"].to_numpy()
 
         masked_bytes = self.apply_mask(selected, masks)
 
-        label = df["AttackLabel"][0]
+        label = df["flow_key"][0]
         return masked_bytes, label
-    
+
     def pad_sequence_IDs(self, sequence: np.ndarray) -> np.ndarray:
         """
         Pad the given sequence of packets with the full byte sequences consisting of the padding token.
-        
+
         Args:
             sequence (np.ndarray): The sequence to pad.
-        
+
         Returns:
             np.ndarray: The padded sequence.
         """
@@ -697,6 +723,35 @@ class PreTrainingDatasetHandler():
         padded_packets = np.ones((padding_length, 1520), dtype=np.int32) * self.InputIDEncoder.SpecialIDs["<pad>"]
         padded_sequence = np.concatenate((sequence, padded_packets), axis=0)
         return padded_sequence, sequence_length
+
+    def draw_sequence_batch(self, batch_size: int) -> tuple[torch.Tensor, list[str], torch.Tensor]:
+        """
+        Get a batch of packet sequences, one flow per sample, for sequence-level
+        (auto)encoder training. Flows longer than self.seq_len are randomly
+        windowed; every sequence is padded out to self.seq_len + 1 packet slots
+        (the extra slot is where Sequence_Encoder later writes its own CLS).
+
+        Args:
+            batch_size (int): The batch size.
+
+        Returns:
+            torch.Tensor: (batch_size, self.seq_len + 1, 1520) token ids.
+            list[str]: The flow_key of each sampled sequence.
+            torch.Tensor: (batch_size,) number of real (non-padding) packets.
+        """
+        batch_data = []
+        batch_labels = []
+        sequence_lengths = np.zeros(batch_size, dtype=np.int32)
+        batch_dfs = self.sample_flow_batch(batch_size)
+        for seq_index, seq_df in enumerate(batch_dfs):
+            bytes_, label = self.get_bytes_as_numpy(seq_df)
+            InputIDs = self.InputIDEncoder.construct_input_ids(bytes_)
+            InputIDs, sequence_length = self.pad_sequence_IDs(InputIDs)
+            InputIDs = torch.tensor(InputIDs)
+            batch_data.append(InputIDs)
+            batch_labels.append(label)
+            sequence_lengths[seq_index] = sequence_length
+        return torch.stack(batch_data), batch_labels, torch.tensor(sequence_lengths)
 
 
 import time

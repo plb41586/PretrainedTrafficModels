@@ -507,7 +507,7 @@ class SequenceClassifier(nn.Module):
         """
         batch_size = tokens.shape[0]
         latent_logits = []
-        seqCLS = self.SeqCLSembedding(torch.LongTensor([0]))
+        seqCLS = self.SeqCLSembedding(torch.zeros(1, dtype=torch.long, device=tokens.device))
         for batch_index in range(batch_size):
             batch = tokens[batch_index]
             encoded = self.encoder(batch)
@@ -553,7 +553,7 @@ class SequenceClassifier(nn.Module):
         # Add the CLS token to the seq_len position
         seq_lens = seq_lens.view(batch_size, 1, 1)
         seq_len_inserts = seq_lens.expand(-1, -1, self.embedding_dim).long()
-        seqCLS = self.SeqCLSembedding(torch.LongTensor([0]))
+        seqCLS = self.SeqCLSembedding(torch.zeros(1, dtype=torch.long, device=tokens.device))
         seqCLS = seqCLS.expand(batch_size, -1, -1)
 
         latent_logits = latent_logits.scatter(1, seq_len_inserts, seqCLS)
@@ -573,3 +573,389 @@ class SequenceClassifier(nn.Module):
         h = h.view(batch_size, -1)
         output = self.output(h)
         return output
+
+# ---------------------------------------------------------------------------
+# Sequence-level params
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SeqEncoderParams:
+    EncoderParams: EncoderParams        # packet-level encoder
+    SeqEncoderDim: int                  # D_seq
+    packets_per_sequence: int           # P (includes the slot used by seq-CLS)
+    SeqBackboneType: str
+    SeqBackboneParams: BackboneParams   # d_model must equal SeqEncoderDim
+
+
+def unpack_seq_encoder_params(config: dict):
+    params = SeqEncoderParams(**config)
+    params.EncoderParams = unpack_encoder_params(params.EncoderParams)
+    params.SeqBackboneParams = unpack_backbone_params(params.SeqBackboneType,
+                                                      params.SeqBackboneParams)
+    return params
+
+
+@dataclass
+class SeqAutoEncoderParams:
+    SeqEncParams: SeqEncoderParams
+    SeqDecoderDim: int                  # D_dec
+    SeqDecBackboneType: str
+    SeqDecBackbone: BackboneParams      # d_model must equal SeqDecoderDim
+    target_mean: list = None            # (D,) packet-latent normalisation stats
+    target_std: list = None
+    length_head: bool = True
+    length_loss_weight: float = 0.1
+
+
+def unpack_seq_ae_params(config: dict):
+    params = SeqAutoEncoderParams(**config)
+    params.SeqEncParams = unpack_seq_encoder_params(params.SeqEncParams)
+    params.SeqDecBackbone = unpack_backbone_params(params.SeqDecBackboneType,
+                                                   params.SeqDecBackbone)
+    return params
+
+
+def load_SeqAE_checkpoint(path: str, device='cpu'):
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    config = unpack_seq_ae_params(ckpt['config'])
+    return config, ckpt
+
+def build_padding_mask(seq_lens: torch.Tensor, num_packets: int) -> torch.Tensor:
+    """(B,) sequence lengths -> (B, P) bool mask, True where a real packet sits."""
+    ar = torch.arange(num_packets, device=seq_lens.device).unsqueeze(0)
+    return ar < seq_lens.view(-1, 1)
+
+
+class Sequence_Encoder(nn.Module):
+    """Encodes a batch of packet sequences into a single flow-level vector.
+
+    Mirrors ``Packet_Encoder`` one level up: the packet encoder plays the role
+    of the embedding table, a sequence backbone contextualises the per-packet
+    latents, and a CLS position is pooled out.
+
+    The sequence CLS embedding is written at index ``seq_len`` (i.e. directly
+    after the last real packet), matching ``SequenceClassifier`` and keeping
+    the model valid under a causal backbone.
+
+    Accepts either raw ``tokens`` of shape ``(B, P, L)`` or pre-computed
+    packet ``latents`` of shape ``(B, P, D)``. The latter path is what you
+    want when the packet encoder is frozen and its outputs are cached.
+    """
+
+    def __init__(self, params: SeqEncoderParams,
+                 packet_encoder: nn.Module = None,
+                 SeqBackbone: nn.Module = None,
+                 freeze_packet_encoder: bool = True):
+        super().__init__()
+        self.params = params
+        D = params.EncoderParams.EncoderDim
+        D_seq = params.SeqEncoderDim
+        self.packet_latent_dim = D
+        self.seq_lvl_dim = D_seq
+        self.num_packets = params.packets_per_sequence
+
+        if packet_encoder is None:
+            self.packet_encoder = Packet_Encoder(params.EncoderParams)
+        else:
+            self.packet_encoder = packet_encoder
+
+        self.frozen_packet_encoder = freeze_packet_encoder
+        if freeze_packet_encoder:
+            self.freeze_packet_encoder()
+
+        self.seq_embedding = nn.Linear(D, D_seq) if D != D_seq else nn.Identity()
+
+        if SeqBackbone is None:
+            self.SeqBackbone = build_backbone(params.SeqBackboneType,
+                                              params.SeqBackboneParams)
+        else:
+            self.SeqBackbone = SeqBackbone
+
+        # CLS lives in sequence space, so it is not distorted by seq_embedding
+        self.SeqCLSembedding = nn.Parameter(torch.zeros(1, 1, D_seq))
+        nn.init.normal_(self.SeqCLSembedding, std=0.02)
+
+    def freeze_packet_encoder(self):
+        self.frozen_packet_encoder = True
+        for p in self.packet_encoder.parameters():
+            p.requires_grad = False
+        self.packet_encoder.eval()
+
+    def unfreeze_packet_encoder(self):
+        self.frozen_packet_encoder = False
+        for p in self.packet_encoder.parameters():
+            p.requires_grad = True
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.frozen_packet_encoder:
+            self.packet_encoder.eval()   # keep frozen encoder out of train mode
+        return self
+
+    def encode_packets(self, tokens: torch.Tensor) -> torch.Tensor:
+        """(B, P, L) tokens -> (B, P, D) packet latents, without the python loop."""
+        B, P, L = tokens.shape
+        flat = tokens.reshape(B * P, L)
+        if self.frozen_packet_encoder:
+            with torch.no_grad():
+                latents = self.packet_encoder(flat)
+        else:
+            latents = self.packet_encoder(flat)
+        return latents.reshape(B, P, -1)
+
+    def forward(self, seq_lens: torch.Tensor,
+                tokens: torch.Tensor = None,
+                latents: torch.Tensor = None):
+        """
+        Args:
+            seq_lens: (B,) number of real packets per sequence.
+            tokens:   (B, P, L) raw byte tokens, or
+            latents:  (B, P, D) pre-computed packet latents.
+
+        Returns:
+            z:       (B, D_seq) flow-level bottleneck vector.
+            latents: (B, P, D)  packet latents (the AE reconstruction targets).
+        """
+        if latents is None:
+            if tokens is None:
+                raise ValueError("Provide either tokens or latents")
+            latents = self.encode_packets(tokens)
+
+        B, P, _ = latents.shape
+        seq_lens = seq_lens.view(B).long()
+
+        h = self.seq_embedding(latents)                       # (B, P, D_seq)
+
+        cls_idx = seq_lens.view(B, 1, 1).expand(-1, -1, self.seq_lvl_dim)
+        h = h.scatter(1, cls_idx, self.SeqCLSembedding.expand(B, -1, -1))
+
+        h = self.SeqBackbone(h)
+        h = h.contiguous()
+
+        z = torch.gather(h, 1, cls_idx).squeeze(1)            # (B, D_seq)
+        return z, latents
+
+class SequenceDecoder(nn.Module):
+    """Reconstructs P packet latents from a single flow vector, in parallel.
+
+    Input to the backbone is ``[cls_proj(z) | query_0 ... query_{P-1}]``.
+    Under a causal backbone each query still sees the CLS at position 0 plus
+    the queries preceding it; since the queries carry no content, no
+    information leaks and no autoregressive drift accumulates.
+    """
+
+    def __init__(self, params: SeqAutoEncoderParams, Backbone: nn.Module = None):
+        super().__init__()
+        D_seq = params.SeqEncParams.SeqEncoderDim
+        D_dec = params.SeqDecoderDim
+        D = params.SeqEncParams.EncoderParams.EncoderDim
+        self.num_packets = params.SeqEncParams.packets_per_sequence
+
+        self.cls_proj = nn.Linear(D_seq, D_dec)
+        self.pos_queries = nn.Parameter(torch.zeros(1, self.num_packets, D_dec))
+        nn.init.normal_(self.pos_queries, std=0.02)
+
+        if Backbone is None:
+            self.Backbone = build_backbone(params.SeqDecBackboneType,
+                                           params.SeqDecBackbone)
+        else:
+            self.Backbone = Backbone
+
+        self.output_head = nn.Linear(D_dec, D)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """(B, D_seq) -> (B, P, D) predicted packet latents (normalised space)."""
+        B = z.size(0)
+        cls_token = self.cls_proj(z).unsqueeze(1)             # (B, 1, D_dec)
+        queries = self.pos_queries.expand(B, -1, -1)          # (B, P, D_dec)
+        h = torch.cat([cls_token, queries], dim=1)            # (B, P+1, D_dec)
+        h = self.Backbone(h)
+        return self.output_head(h[:, 1:, :])                  # drop CLS position
+
+class SequenceAutoencoder(nn.Module):
+    """Option A: hard bottleneck at the sequence CLS.
+
+    A whole flow is compressed into one vector and decoded back into all P
+    packet latents. Reconstruction is supervised in *normalised* packet-latent
+    space; an auxiliary length head makes the bottleneck carry sequence length
+    so that standalone reconstruction at inference is well defined.
+    """
+
+    def __init__(self, params: SeqAutoEncoderParams,
+                 encoder: nn.Module = None,
+                 decoder: nn.Module = None,
+                 freeze_packet_encoder: bool = True):
+        super().__init__()
+        self.params = params
+        D = params.SeqEncParams.EncoderParams.EncoderDim
+        D_seq = params.SeqEncParams.SeqEncoderDim
+        P = params.SeqEncParams.packets_per_sequence
+        self.num_packets = P
+
+        self.encoder = encoder if encoder is not None else Sequence_Encoder(
+            params.SeqEncParams, freeze_packet_encoder=freeze_packet_encoder)
+        self.decoder = decoder if decoder is not None else SequenceDecoder(params)
+
+        self.length_output = nn.Linear(D_seq, P + 1) if params.length_head else None
+        self.length_loss_weight = params.length_loss_weight
+
+        mean = torch.zeros(D) if params.target_mean is None \
+            else torch.tensor(params.target_mean, dtype=torch.float)
+        std = torch.ones(D) if params.target_std is None \
+            else torch.tensor(params.target_std, dtype=torch.float)
+        self.register_buffer("target_mean", mean)
+        self.register_buffer("target_std", std)
+
+    # -- target normalisation ------------------------------------------------
+
+    def set_target_stats(self, mean: torch.Tensor, std: torch.Tensor, eps=1e-5):
+        self.target_mean.copy_(mean.to(self.target_mean.device))
+        self.target_std.copy_(std.clamp_min(eps).to(self.target_std.device))
+        self.params.target_mean = self.target_mean.tolist()
+        self.params.target_std = self.target_std.tolist()
+
+    def normalize(self, latents):
+        return (latents - self.target_mean) / self.target_std
+
+    def denormalize(self, latents):
+        return latents * self.target_std + self.target_mean
+
+    # -- forward / loss ------------------------------------------------------
+
+    def forward(self, seq_lens, tokens=None, latents=None):
+        """Returns (pred_norm, target_norm, z, length_logits, mask).
+
+        ``pred_norm`` and ``target_norm`` are both in normalised latent space,
+        shape (B, P, D). ``mask`` is (B, P) and True at real packets.
+        """
+        z, latents = self.encoder(seq_lens, tokens=tokens, latents=latents)
+        pred_norm = self.decoder(z)
+        target_norm = self.normalize(latents)
+        mask = build_padding_mask(seq_lens.view(-1), self.num_packets)
+        length_logits = self.length_output(z) if self.length_output is not None else None
+        return pred_norm, target_norm, z, length_logits, mask
+
+    def loss(self, pred_norm, target_norm, mask, length_logits=None, seq_lens=None):
+        """Padding-masked MSE in normalised space, plus optional length CE."""
+        m = mask.unsqueeze(-1).float()
+        se = ((pred_norm - target_norm) ** 2) * m
+        recon = se.sum() / m.sum().clamp_min(1.0) / pred_norm.size(-1) * pred_norm.size(-1)
+        recon = se.sum() / (m.sum().clamp_min(1.0) * pred_norm.size(-1))
+
+        out = {"recon": recon, "total": recon}
+        if length_logits is not None and seq_lens is not None:
+            len_loss = nn.functional.cross_entropy(length_logits, seq_lens.view(-1).long())
+            out["length"] = len_loss
+            out["total"] = recon + self.length_loss_weight * len_loss
+        return out
+
+    # -- inference -----------------------------------------------------------
+
+    @torch.no_grad()
+    def encode(self, seq_lens, tokens=None, latents=None):
+        z, _ = self.encoder(seq_lens, tokens=tokens, latents=latents)
+        return z
+
+    @torch.no_grad()
+    def reconstruct_latents(self, z):
+        """(B, D_seq) -> (B, P, D) in original (un-normalised) latent space."""
+        return self.denormalize(self.decoder(z))
+
+    @torch.no_grad()
+    def predicted_lengths(self, z):
+        if self.length_output is None:
+            return None
+        return self.length_output(z).argmax(dim=-1)
+
+@torch.no_grad()
+def flatten_valid(pred_norm, target_norm, mask):
+    m = mask.reshape(-1)
+    return pred_norm.reshape(-1, pred_norm.size(-1))[m], \
+           target_norm.reshape(-1, target_norm.size(-1))[m]
+
+
+@torch.no_grad()
+def retrieval_accuracy(pred_norm, target_norm, mask, chunk: int = 1024):
+    """Fraction of predicted latents whose nearest true latent is the correct one.
+
+    Computed over all valid packets in the batch, so the difficulty scales with
+    batch size -- report the batch size alongside the number.
+    """
+    p, t = flatten_valid(pred_norm, target_norm, mask)
+    n = p.size(0)
+    if n < 2:
+        return float('nan'), n
+    correct = 0
+    for i in range(0, n, chunk):
+        d = torch.cdist(p[i:i + chunk], t)                     # (chunk, N)
+        nn_idx = d.argmin(dim=1)
+        tgt = torch.arange(i, min(i + chunk, n), device=p.device)
+        correct += (nn_idx == tgt).sum().item()
+    return correct / n, n
+
+
+@torch.no_grad()
+def baseline_mses(target_norm, mask):
+    """Two 'learn nothing' baselines the model must beat.
+
+    global:       predict the mean latent everywhere
+    per_position: predict the mean latent for each packet index
+    """
+    m = mask.unsqueeze(-1).float()
+    denom = (m.sum() * target_norm.size(-1)).clamp_min(1.0)
+
+    glob = (target_norm * m).sum(dim=(0, 1)) / m.sum(dim=(0, 1)).clamp_min(1.0)
+    glob_mse = (((target_norm - glob) ** 2) * m).sum() / denom
+
+    pos_denom = m.sum(dim=0).clamp_min(1.0)                    # (P, 1)
+    pos = (target_norm * m).sum(dim=0) / pos_denom             # (P, D)
+    pos_mse = (((target_norm - pos.unsqueeze(0)) ** 2) * m).sum() / denom
+
+    return {"global": glob_mse.item(), "per_position": pos_mse.item()}
+
+
+@torch.no_grad()
+def byte_level_reconstruction(seq_ae, packet_decoder, seq_lens, tokens,
+                              latents=None, pad_token_id=None, temperature=0.0):
+    """Eval-only: pipe reconstructed latents through the frozen packet decoder.
+
+    Returns byte-level accuracy against the original packets, directly
+    comparable to the packet-level AE numbers. No gradients flow here.
+    """
+    z, _ = seq_ae.encoder(seq_lens, tokens=tokens, latents=latents)
+    lat_hat = seq_ae.reconstruct_latents(z)                    # (B, P, D)
+    B, P, D = lat_hat.shape
+    gen = packet_decoder.generate(lat_hat.reshape(B * P, D),
+                                  temperature=temperature)     # (B*P, L')
+    ref = tokens.reshape(B * P, -1)
+    L = min(gen.size(1), ref.size(1))
+    gen, ref = gen[:, :L], ref[:, :L]
+
+    pkt_mask = build_padding_mask(seq_lens.view(-1), P).reshape(-1, 1)
+    byte_mask = pkt_mask.expand(-1, L)
+    if pad_token_id is not None:
+        byte_mask = byte_mask & (ref != pad_token_id)
+    return ((gen == ref) & byte_mask).sum().item() / byte_mask.sum().clamp_min(1).item()
+
+@torch.no_grad()
+def precompute_latents(packet_encoder, dataloader, device='cuda'):
+    """Cache frozen packet latents so the AE trains on (B, P, D) floats.
+
+    Expects the loader to yield (tokens (B,P,L), seq_lens (B,)).
+    Returns (latents (N,P,D), seq_lens (N,)) on CPU.
+    """
+    packet_encoder.eval().to(device)
+    all_lat, all_lens = [], []
+    for tokens, seq_lens in dataloader:
+        B, P, L = tokens.shape
+        lat = packet_encoder(tokens.to(device).reshape(B * P, L))
+        all_lat.append(lat.reshape(B, P, -1).cpu())
+        all_lens.append(seq_lens.cpu())
+    return torch.cat(all_lat), torch.cat(all_lens)
+
+
+def compute_target_stats(latents, seq_lens, eps=1e-5):
+    """Per-dimension mean/std over *valid* packets only."""
+    mask = build_padding_mask(seq_lens.view(-1), latents.size(1))
+    valid = latents[mask]                                      # (N_valid, D)
+    return valid.mean(dim=0), valid.std(dim=0).clamp_min(eps)
