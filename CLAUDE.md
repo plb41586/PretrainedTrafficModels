@@ -51,10 +51,17 @@ cargo build --release            # from feature_extraction/
 cargo run --release -- --file <pcap> [--cache-payloads] [--graph-name <name>] [--pl-outfile <path>]
 ```
 
-Data splitting utility:
+Data splitting utilities (both take their config from constants at the bottom of the file):
 ```
-python -m data_tools.SplitDataDF   # edit DATA_FILE/OUTPUT_DIR constants at bottom of file first
+python -m data_tools.SplitDataDF    # packet-level: contiguous row slices, ignores flows
+python -m data_tools.SplitFlowsDF   # flow-level: whole flows per split, long flows cut by time
 ```
+`SplitFlowsDF` is the one to use for flow/sequence-level work — it keeps every flow in a single
+split, cutting only long-lived flows chronologically (train -> test -> val), and hits the ratios
+in packets. It assumes an attack-free capture (see its module docstring). It groups on a
+canonical conversation key derived in Python because the extractor's `flow_key` is directional
+and fragmented by `proto_hierarchy` (see `TODO.md`); the `flow_key` column itself is written out
+unchanged, so the latent-cache path is unaffected.
 
 ## Architecture: model components
 
