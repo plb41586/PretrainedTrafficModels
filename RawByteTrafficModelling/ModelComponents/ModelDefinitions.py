@@ -74,14 +74,18 @@ def load_AE_Checkpoint(path: str, device='cpu'):
                                                 config.DecBackbone)
     return config, ckpt
 
-def save_checkpoint(model, optimizer, epoch, loss, config, path: str):
-    torch.save({
+def save_checkpoint(model, optimizer, epoch, loss, config, path: str, extra: dict = None):
+    """``extra`` is merged into the saved dict -- scheduler state, best val loss, etc."""
+    ckpt = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss,
         'config': asdict(config),
-    }, path)
+    }
+    if extra:
+        ckpt.update(extra)
+    torch.save(ckpt, path)
 
 class DynamicCLSPooling(nn.Module):
     """
@@ -839,7 +843,6 @@ class SequenceAutoencoder(nn.Module):
         """Padding-masked MSE in normalised space, plus optional length CE."""
         m = mask.unsqueeze(-1).float()
         se = ((pred_norm - target_norm) ** 2) * m
-        recon = se.sum() / m.sum().clamp_min(1.0) / pred_norm.size(-1) * pred_norm.size(-1)
         recon = se.sum() / (m.sum().clamp_min(1.0) * pred_norm.size(-1))
 
         out = {"recon": recon, "total": recon}

@@ -566,6 +566,31 @@ class PreTrainingDatasetHandler():
         self.data = data
         self.seq_len = seq_len # Number of packets in a sequence
         self.InputIDEncoder = encoder
+        self._flow_index = None # built lazily, see build_flow_index
+
+    def build_flow_index(self) -> pl.DataFrame:
+        """
+        Map every flow_key to the row indices of its packets, in timestamp order.
+
+        Built once and cached on the handler. This is deliberately *not* done in
+        __init__: the packet-level scripts construct this handler with seq_len=1
+        and never touch flows, so they must not pay for the sort.
+
+        Returns:
+            pl.DataFrame: columns `flow_key` (str) and `row_idx` (list[u32]),
+                          one row per flow. Flow order is the sorted flow_key
+                          order, and within a flow the indices are in
+                          (timestamp_s, timestamp_us) order.
+        """
+        if self._flow_index is None:
+            self._flow_index = (
+                self.data
+                .with_row_index("row_idx")
+                .sort(["flow_key", "timestamp_s", "timestamp_us"])
+                .group_by("flow_key", maintain_order=True)
+                .agg(pl.col("row_idx"))
+            )
+        return self._flow_index
 
     def get_packet_sequence_from_df(self, df: pl.DataFrame, seq_len: int):
         """
@@ -601,22 +626,28 @@ class PreTrainingDatasetHandler():
         sequence-level (auto)encoder training, where a "sample" is a flow
         rather than an individual packet.
 
+        Flows are drawn with replacement. Row lookup goes through the cached
+        flow index (build_flow_index), so a batch costs one gather rather than
+        `batch_size` full-table scans.
+
         input:
             batch_size: The batch size.
         output:
             batch_data: A list of packet sequences in polars DataFrame format,
                         each sorted by (timestamp_s, timestamp_us).
         """
-        flow_keys = self.data["flow_key"].unique().to_list()
-        flow_picks = np.random.choice(flow_keys, batch_size)
+        flow_index = self.build_flow_index()
+        flow_picks = np.random.randint(0, flow_index.height, size=batch_size)
+        row_idx_col = flow_index["row_idx"]
 
-        def process_flow(flow_key):
-            flow_df = self.data.filter(pl.col("flow_key") == flow_key) \
-                                .sort(["timestamp_s", "timestamp_us"])
-            return self.get_packet_sequence_from_df(flow_df, self.seq_len)
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            batch_data = list(executor.map(process_flow, flow_picks))
+        batch_data = []
+        for flow in flow_picks:
+            rows = row_idx_col[int(flow)].to_numpy()
+            length = rows.shape[0]
+            if length > self.seq_len:
+                start = np.random.randint(0, length - self.seq_len + 1)
+                rows = rows[start:start + self.seq_len]
+            batch_data.append(self.data[rows])
 
         return batch_data
 
@@ -752,6 +783,177 @@ class PreTrainingDatasetHandler():
             batch_labels.append(label)
             sequence_lengths[seq_index] = sequence_length
         return torch.stack(batch_data), batch_labels, torch.tensor(sequence_lengths)
+
+
+def checkpoint_fingerprint(path: str) -> str:
+    """
+    sha256 of a checkpoint file, used to tie a latent cache to the exact packet
+    encoder that produced it.
+
+    Comparing paths is not enough: retraining the packet-level model usually
+    writes back to the same filename, and a cache built from the old weights
+    would then be silently reused with the new ones.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_latent_cache(cache_dir: str, packet_ae_ckpt: str = None) -> tuple[torch.Tensor, pl.DataFrame, dict]:
+    """
+    Load a packet-latent cache written by PreTraining/CachePacketLatents.py.
+
+    Args:
+        cache_dir:      directory holding meta.json, flow_offsets.parquet and shard_*.npy.
+        packet_ae_ckpt: if given, verify the cache was built from this exact
+                        checkpoint and raise if not.
+
+    Returns:
+        torch.Tensor: (N, D) float16 latents, in cache row order.
+        pl.DataFrame: flow_key / start / length.
+        dict:         the cache's meta.json.
+    """
+    import json
+    import os
+
+    meta_path = os.path.join(cache_dir, "meta.json")
+    if not os.path.exists(meta_path):
+        raise FileNotFoundError(
+            f"No latent cache at {cache_dir}. Build it first with "
+            f"`python -m RawByteTrafficModelling.PreTraining.CachePacketLatents` "
+            f"(set SPLIT_FILE/CACHE_DIR at the top of that script)."
+        )
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    if packet_ae_ckpt is not None:
+        expected = meta.get("packet_ae_sha256")
+        actual = checkpoint_fingerprint(packet_ae_ckpt)
+        if expected is None:
+            raise ValueError(
+                f"{cache_dir} predates checkpoint fingerprinting and cannot be "
+                f"verified against {packet_ae_ckpt}. Rebuild it with CachePacketLatents."
+            )
+        if expected != actual:
+            raise ValueError(
+                f"{cache_dir} was built from a different packet encoder "
+                f"(cache {expected[:12]}, {packet_ae_ckpt} is {actual[:12]}). "
+                f"The latents are stale -- rebuild with CachePacketLatents."
+            )
+
+    shards = [np.load(os.path.join(cache_dir, f"shard_{i:04d}.npy"))
+              for i in range(meta["num_shards"])]
+    latents = torch.from_numpy(np.concatenate(shards, axis=0))
+    if latents.shape[0] != meta["num_rows"]:
+        raise ValueError(f"{cache_dir}: shards hold {latents.shape[0]} rows, "
+                         f"meta.json says {meta['num_rows']}")
+
+    flow_offsets = pl.read_parquet(os.path.join(cache_dir, "flow_offsets.parquet"))
+    return latents, flow_offsets, meta
+
+
+class CachedLatentSequenceHandler():
+    """
+    Sequence-level batching straight out of a cached packet-latent array.
+
+    The packet encoder is frozen during sequence-level training, so its output
+    for a given packet never changes. CachePacketLatents.py encodes every packet
+    of a split once and writes the latents in flow-grouped, timestamp-sorted
+    order; each flow is therefore a *contiguous* slice of that array and a
+    training batch is a gather rather than 65 x batch_size packet forwards.
+
+    Shapes match what PreTrainingDatasetHandler.pad_sequence_IDs produces on the
+    token path: P = packets_per_sequence slots, with seq_lens in [1, P-1] real
+    packets, which is what Sequence_Encoder's scatter-at-seq_len requires.
+    """
+
+    def __init__(self, latents: torch.Tensor, flow_offsets: pl.DataFrame,
+                 packets_per_sequence: int):
+        """
+        Args:
+            latents:      (N, D) packet latents, in the cache's row order.
+            flow_offsets: columns `flow_key`, `start`, `length` -- one row per
+                          flow, `start` indexing into `latents`.
+            packets_per_sequence: P, including the slot the seq-CLS overwrites.
+        """
+        self.latents = latents
+        self.flow_keys = flow_offsets["flow_key"].to_list()
+        self.starts = flow_offsets["start"].to_numpy().astype(np.int64)
+        self.lengths = flow_offsets["length"].to_numpy().astype(np.int64)
+        self.num_packets = packets_per_sequence
+        self.seq_len = packets_per_sequence - 1   # max real packets per sequence
+        self.latent_dim = latents.shape[1]
+
+    def epoch_flow_batches(self, batch_size: int, rng: np.random.Generator) -> list[np.ndarray]:
+        """
+        One epoch's worth of flow indices, shuffled, without replacement.
+
+        The flow-level analogue of sample_epoch_packet_indices -- every flow is
+        visited exactly once per epoch (the token-path draw_sequence_batch
+        samples with replacement and has no epoch notion).
+        """
+        flows = rng.permutation(len(self.starts))
+        return [flows[i:i + batch_size] for i in range(0, len(flows), batch_size)]
+
+    def _gather(self, starts: np.ndarray, takes: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+        """(starts, takes) row slices -> ((B, P, D) float32 latents, (B,) lengths)."""
+        B = starts.shape[0]
+        src = np.concatenate([np.arange(s, s + t) for s, t in zip(starts, takes)])
+        dest_b = np.repeat(np.arange(B), takes)
+        dest_p = np.concatenate([np.arange(t) for t in takes])
+
+        out = torch.zeros(B, self.num_packets, self.latent_dim, dtype=torch.float32)
+        out[torch.from_numpy(dest_b).long(), torch.from_numpy(dest_p).long()] = \
+            self.latents[torch.from_numpy(src).long()].float()
+        return out, torch.from_numpy(takes.copy()).long()
+
+    def draw_latent_batch(self, flow_ids: np.ndarray,
+                          rng: np.random.Generator) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Training batch: one randomly positioned window per flow.
+
+        Windowing mirrors get_packet_sequence_from_df -- flows longer than
+        seq_len get a random contiguous window, shorter flows are taken whole
+        and zero-padded. Padding is zeros because DynamicCLSPooling returns a
+        zero vector for an all-<pad> packet, so the token path pads with zeros
+        too; anything else would show the sequence backbone a different padding
+        distribution than it was smoke-tested on.
+        """
+        lengths = self.lengths[flow_ids]
+        takes = np.minimum(lengths, self.seq_len)
+        slack = lengths - takes
+        offsets = (rng.random(len(flow_ids)) * (slack + 1)).astype(np.int64)
+        offsets = np.minimum(offsets, slack)
+        return self._gather(self.starts[flow_ids] + offsets, takes)
+
+    def enumerate_windows(self) -> np.ndarray:
+        """
+        Deterministic, non-overlapping windows over every flow.
+
+        Same chopping as ValidationDatasetHandler.FlowDf2Seq: a flow shorter
+        than seq_len yields one short window, otherwise floor(L / seq_len) full
+        windows and the remainder is dropped.
+
+        Returns:
+            np.ndarray: (W, 2) array of (start_row, length) pairs.
+        """
+        windows = []
+        for start, length in zip(self.starts, self.lengths):
+            num_sequences = length // self.seq_len
+            if num_sequences == 0:
+                windows.append((start, length))
+            else:
+                for i in range(num_sequences):
+                    windows.append((start + i * self.seq_len, self.seq_len))
+        return np.array(windows, dtype=np.int64)
+
+    def latent_batch_from_windows(self, windows: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+        """(W, 2) (start, length) rows -> ((W, P, D) latents, (W,) lengths)."""
+        return self._gather(windows[:, 0], windows[:, 1])
 
 
 import time
