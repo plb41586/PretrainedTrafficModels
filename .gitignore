@@ -2,6 +2,12 @@
 training_outputs/* # Training outputs temporarily stored
 */ModelStorage/* # Models stored persistently
 
+# Per-run artefacts written by the training / AD scripts (checkpoints, embeddings, scores,
+# figures, reports). All regenerable from the scripts, and large: a single scores.parquet
+# is ~8 MB and a projection.png ~2 MB.
+RawByteTrafficModelling/PreTraining/TrainingOutputs/
+RawByteTrafficModelling/AnomalyDetection/Outputs/
+
 # Auto generated reports
 
 # Short term experiments
@@ -59,6 +65,8 @@ MANIFEST
 *.pkl
 *.graphml
 *.npy
+*.parquet
+*.bak
 data/*
 data_artefacts/*
 

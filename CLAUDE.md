@@ -16,29 +16,83 @@ detection. It bundles two mostly-independent subsystems:
 There is a Python client (`feature_extraction/pythonclient/client.py`) that reads the
 msgpack-serialized payload sets the Rust side writes to Redis.
 
+## Running commands (read before executing anything)
+
+**Nothing in this project runs on the host.** The host has no usable interpreter and no GPU
+deps — every Python invocation, script run, smoke test, `cargo` build, and data-tool run
+happens inside the devcontainer. A host `python`/`python3`/`py_compile` call is always wrong;
+it will fail with `No such file or directory` or, worse, pick up a stray interpreter and
+report a misleading result.
+
+**Ask before every single container command.** Do not batch them, do not treat one approval
+as covering the next, and never fire one off "just to check something quickly". For each
+command, before running it:
+
+1. Show the **entire** command verbatim — no abbreviation, no `...`.
+2. Give a one- or two-sentence reason why it is the right thing to run now.
+3. Wait for explicit confirmation.
+
+Reading files, `grep`, `ls`, and `git` on the host need no confirmation — the restriction is
+about *executing* project code.
+
+The container is a long-running `docker compose` service named **`devcontainer`** (user
+`plb41586`, uid 1000). The repo is bind-mounted from the host at
+`/home/plb41586/projects/PretrainedTrafficModels` to `/home/plb41586/workspace` inside it, so
+edits made on the host are already visible — there is nothing to copy or rebuild. The venv is
+on `PATH` via a Dockerfile `ENV`, so plain `python` is the venv's python even in a
+non-interactive `docker exec`.
+
+Canonical form (the `-w` is required; module imports resolve via cwd):
+```
+docker exec -w /home/plb41586/workspace devcontainer python -m RawByteTrafficModelling.PreTraining.SequenceLevelAutoEncoder
+```
+Add `bash -lc '<command>'` only when shell features are needed (pipes, redirection, globs) —
+the container shell is bash, the host shell is fish, so quoting differs. Prefer letting the
+user launch long training runs themselves with the `! <command>` prefix; propose the exact
+command rather than running it.
+
+Verification etiquette: since a syntax check is itself a container command, expect to hand
+edits over unverified. Say plainly what has not been run, and give the exact command that
+would check it. Prefer one meaningful run (a real script with a small
+`MAX_STEPS_PER_EPOCH`) over a series of small probes.
+
 ## Environment
 
-This project is meant to run inside the devcontainer defined in `.devcontainer/`
-(`pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel` base image). Key environment facts baked into
-the container:
-- `PYTHONPATH` includes `/workspace` (the repo root), which is why Python modules use
-  absolute imports like `from RawByteTrafficModelling.ModelComponents.ModelDefinitions import ...`
-  — run scripts as modules from the repo root (`python -m RawByteTrafficModelling.PreTraining.PacketLevelMLM`),
-  not as bare scripts, or the imports will fail.
-- A venv at `/home/<user>/app/venv` has GPU-only deps preinstalled (`mamba-ssm`, `causal-conv1d`,
-  `keras-nlp`/`keras_hub`, `torch`) that are not all captured in `requirements.txt`.
-- Rust toolchain via rustup; `feature_extraction/target/release` is on `PATH`.
+This project runs inside the devcontainer defined in `.devcontainer/`
+(`pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel` base image, compose service and container name
+both `devcontainer`). Key environment facts baked into the container:
+- The workspace folder is `/home/plb41586/workspace` (bind mount of the repo root).
+- Python modules use absolute imports like
+  `from RawByteTrafficModelling.ModelComponents.ModelDefinitions import ...`, so run scripts as
+  modules **from the workspace folder** (`python -m RawByteTrafficModelling.PreTraining.PacketLevelMLM`),
+  never as bare scripts. What puts the repo on `sys.path` is cwd, not `PYTHONPATH`: the
+  `.bashrc` line exports `/workspace`, which is a leftover from an older mount point and does
+  not exist in the container. Hence `-w /home/plb41586/workspace` on every `docker exec`.
+- A venv at `/home/plb41586/app/venv` has GPU-only deps preinstalled (`mamba-ssm`,
+  `causal-conv1d`, `keras-nlp`/`keras_hub`, `torch`) that are not all captured in
+  `requirements.txt`. It is first on `PATH` via `ENV`, so `python` is the venv's python without
+  activating anything.
+- One GPU is reserved for the container; `redis` runs as a second service on the `devnet`
+  network, reachable at host `redis`.
+- Rust toolchain via rustup; `feature_extraction/target/release` is on `PATH` (via the same
+  stale `/workspace` prefix — build and invoke by path if that bites).
 
 There is no test suite (no `pytest`/`unittest` files anywhere in the repo) and no lint/CI
 config. Don't invent test or lint commands — verify changes by running the relevant script or
-`cargo build`/`cargo check`.
+`cargo build`/`cargo check`, in the container, after asking (see "Running commands" above).
 
 ## Common commands
 
-Python (run from repo root so `RawByteTrafficModelling` resolves as a package):
+All of these run **inside the container**, and each one needs its own confirmation first
+(see "Running commands"). They are written below in bare form for readability; the actual
+invocation is always `docker exec -w /home/plb41586/workspace devcontainer <command>`.
+
+Python (cwd must be the workspace folder so `RawByteTrafficModelling` resolves as a package):
 ```
 python -m RawByteTrafficModelling.PreTraining.PacketLevelMLM
 python -m RawByteTrafficModelling.PreTraining.PacketLevelAutoEncoder
+python -m RawByteTrafficModelling.PreTraining.SequenceLevelAutoEncoder
+python -m RawByteTrafficModelling.PreTraining.CachePacketLatents
 python -m RawByteTrafficModelling.AnomalyDetection.AutoEncoderAD
 ```
 These are not CLI tools — they are scripts with hardcoded config (paths, hyperparameters,
@@ -125,10 +179,19 @@ the params alongside `model_state_dict`, see `save_checkpoint`):
    Python-loop `forward` and a vectorized `forward_ff` variant kept side by side for
    comparison.
 
-Evaluation helpers at the bottom of `ModelDefinitions.py` (`retrieval_accuracy`,
-`baseline_mses`, `byte_level_reconstruction`) are all `@torch.no_grad()` and operate on the
-padding-masked, normalized latents produced by `SequenceAutoencoder.forward` — use
+Evaluation helpers at the bottom of `ModelDefinitions.py` are all `@torch.no_grad()`.
+`baseline_mses` operates on the padding-masked, normalized latents produced by
+`SequenceAutoencoder.forward`; `byte_level_reconstruction` / `decoder_byte_accuracy` score
+teacher-forced byte accuracy through a frozen packet decoder (the same way
+`PacketLevelAutoEncoder` scores itself, so the levels are comparable) and report `all` /
+`nonpad` — the all-position number reads high on predicting `<pad>` alone. Use
 `build_padding_mask(seq_lens, num_packets)` rather than re-deriving padding masks elsewhere.
+
+A `retrieval_accuracy` helper (nearest-neighbour identification among the batch's true
+latents) was removed on purpose: in this traffic, near-duplicate packets are pervasive and
+the candidate pool is ~9.6k per val batch, so it sat near chance while reconstruction MSE
+improved 16x — it measured the density of the target space, not the model. Byte accuracy
+against the packet-AE ceiling replaced it; don't reintroduce it.
 
 ### Working with this hierarchy
 

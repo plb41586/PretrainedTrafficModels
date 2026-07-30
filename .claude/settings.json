@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(python)",
+      "Bash(python *)",
+      "Bash(python3)",
+      "Bash(python3 *)",
+      "Bash(pytest)",
+      "Bash(pytest *)"
+    ],
+    "ask": [
+      "Bash(docker exec *)",
+      "Bash(docker compose *)"
+    ]
+  }
+}

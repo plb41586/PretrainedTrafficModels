@@ -10,7 +10,7 @@ import logging
 import torch.nn.functional as F
 import os
 
-output_dir = "RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/PacketEmbeddings_AutoEncoder/Untrained"
+output_dir = "RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/PacketEmbeddings_AutoEncoder/Split"
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -23,9 +23,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-device = torch.device("cuda:0")
+device = torch.device("cuda:1")
 
-AEpath = '/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_AutoEncoder/PacketLevelAutoEncoder_EdgeIIoT_untrained.ckpt'
+AEpath = 'RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_AutoEncoder_FlowSplit/PacketLevelAutoEncoder_EdgeIIoT_E0.ckpt'
 AEparams, ckpt = load_AE_Checkpoint(AEpath)
 AE_model = PacketAutoencoder(AEparams)
 AE_model.load_state_dict(ckpt['model_state_dict'])
@@ -51,7 +51,7 @@ ID_Encoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "
 
 attack_dir = 'data_artefacts/IIoTset-Ferrag/attacks'
 attack_files = os.listdir(attack_dir)
-normal_file = "/home/plb41586/workspace/data_artefacts/IIoTset-Ferrag/NormalMerged.parquet"
+normal_file = "data_artefacts/IIoTset-Ferrag/flow_split/val.parquet"
 
 files = []
 for file in attack_files:
