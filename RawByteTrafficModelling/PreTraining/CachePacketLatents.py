@@ -37,9 +37,9 @@ import json
 import os
 
 ### Set Cache Parameters
-SPLIT_FILE = "data_artefacts/IIoTset-Ferrag/split/val.parquet"
-PACKET_AE_CKPT = "RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_AutoEncoder/PacketLevelAutoEncoder_EdgeIIoT_E0.ckpt"
-CACHE_DIR = "data_artefacts/IIoTset-Ferrag/split/latents_EdgeIIoT_E0/val"
+SPLIT_FILE = "data_artefacts/IIoTset-Ferrag/flow_split/test.parquet"
+PACKET_AE_CKPT = "RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_AutoEncoder_FlowSplit/PacketLevelAutoEncoder_EdgeIIoT_E1.ckpt"
+CACHE_DIR = "data_artefacts/IIoTset-Ferrag/split/latents_EdgeIIoT_E1/test"
 
 ENCODE_BATCH = 512
 SHARD_ROWS = 1_000_000
@@ -70,7 +70,7 @@ logger.info(data.shape)
 ID_Encoder = ID_Encoder(SpecialIDs=SpecialIDs, CLS_Placement="EOS")
 DataHandler = PreTrainingDatasetHandler(data, 1, ID_Encoder)
 
-device = torch.device("cuda")
+device = torch.device("cuda:1")
 
 # --- Flow index -> cache row order ----------------------------------------
 # Every flow becomes a contiguous slice of the latent array, so the training

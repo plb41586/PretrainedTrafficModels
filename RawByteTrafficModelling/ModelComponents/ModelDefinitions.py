@@ -313,6 +313,9 @@ class AutoregressiveDecoder(nn.Module):
         if tokens is None or tokens.size(1) == 0:
             return cls_token
         token_embeds = self.embedding(tokens)  # (batch, seq_len, embedding_dim)
+        # match the projection's dtype so autocast is not undone by cat's
+        # promotion back to the fp32 embedding output
+        token_embeds = token_embeds.to(cls_token.dtype)
         return torch.cat([cls_token, token_embeds], dim=1)
 
     def forward(self, cls_embedding: torch.Tensor, target_tokens: torch.Tensor) -> torch.Tensor:
@@ -558,7 +561,9 @@ class SequenceClassifier(nn.Module):
         seq_lens = seq_lens.view(batch_size, 1, 1)
         seq_len_inserts = seq_lens.expand(-1, -1, self.embedding_dim).long()
         seqCLS = self.SeqCLSembedding(torch.zeros(1, dtype=torch.long, device=tokens.device))
-        seqCLS = seqCLS.expand(batch_size, -1, -1)
+        # scatter needs matching dtypes: under autocast the encoder output comes
+        # back in the AMP dtype while nn.Embedding output stays fp32.
+        seqCLS = seqCLS.expand(batch_size, -1, -1).to(latent_logits.dtype)
 
         latent_logits = latent_logits.scatter(1, seq_len_inserts, seqCLS)
         
@@ -731,7 +736,10 @@ class Sequence_Encoder(nn.Module):
         h = self.seq_embedding(latents)                       # (B, P, D_seq)
 
         cls_idx = seq_lens.view(B, 1, 1).expand(-1, -1, self.seq_lvl_dim)
-        h = h.scatter(1, cls_idx, self.SeqCLSembedding.expand(B, -1, -1))
+        # scatter needs matching dtypes: under autocast h comes back in the AMP
+        # dtype while the raw CLS parameter stays fp32.
+        cls = self.SeqCLSembedding.expand(B, -1, -1).to(h.dtype)
+        h = h.scatter(1, cls_idx, cls)
 
         h = self.SeqBackbone(h)
         h = h.contiguous()
@@ -771,7 +779,9 @@ class SequenceDecoder(nn.Module):
         """(B, D_seq) -> (B, P, D) predicted packet latents (normalised space)."""
         B = z.size(0)
         cls_token = self.cls_proj(z).unsqueeze(1)             # (B, 1, D_dec)
-        queries = self.pos_queries.expand(B, -1, -1)          # (B, P, D_dec)
+        # match the projection's dtype so autocast is not undone by cat's
+        # promotion back to the fp32 query parameter
+        queries = self.pos_queries.expand(B, -1, -1).to(cls_token.dtype)
         h = torch.cat([cls_token, queries], dim=1)            # (B, P+1, D_dec)
         h = self.Backbone(h)
         return self.output_head(h[:, 1:, :])                  # drop CLS position
@@ -871,33 +881,6 @@ class SequenceAutoencoder(nn.Module):
         return self.length_output(z).argmax(dim=-1)
 
 @torch.no_grad()
-def flatten_valid(pred_norm, target_norm, mask):
-    m = mask.reshape(-1)
-    return pred_norm.reshape(-1, pred_norm.size(-1))[m], \
-           target_norm.reshape(-1, target_norm.size(-1))[m]
-
-
-@torch.no_grad()
-def retrieval_accuracy(pred_norm, target_norm, mask, chunk: int = 1024):
-    """Fraction of predicted latents whose nearest true latent is the correct one.
-
-    Computed over all valid packets in the batch, so the difficulty scales with
-    batch size -- report the batch size alongside the number.
-    """
-    p, t = flatten_valid(pred_norm, target_norm, mask)
-    n = p.size(0)
-    if n < 2:
-        return float('nan'), n
-    correct = 0
-    for i in range(0, n, chunk):
-        d = torch.cdist(p[i:i + chunk], t)                     # (chunk, N)
-        nn_idx = d.argmin(dim=1)
-        tgt = torch.arange(i, min(i + chunk, n), device=p.device)
-        correct += (nn_idx == tgt).sum().item()
-    return correct / n, n
-
-
-@torch.no_grad()
 def baseline_mses(target_norm, mask):
     """Two 'learn nothing' baselines the model must beat.
 
@@ -918,27 +901,69 @@ def baseline_mses(target_norm, mask):
 
 
 @torch.no_grad()
+def decoder_byte_accuracy(packet_decoder, latents, tokens, pad_token_id=None,
+                          chunk: int = 64) -> dict:
+    """Teacher-forced byte accuracy of a packet decoder over flat packets.
+
+    Scored the same way PacketLevelAutoEncoder scores itself -- teacher forced,
+    argmax against the true tokens -- so the numbers are comparable across the
+    packet level and the sequence level.
+
+    Args:
+        packet_decoder: frozen ``AutoregressiveDecoder``.
+        latents:        (N, D) latents to decode from, in *un-normalised* space.
+        tokens:         (N, L) ground-truth token ids for those packets.
+        pad_token_id:   if given, also score non-pad positions only.
+        chunk:          packets per decoder forward. The (chunk, L, vocab)
+                        logits tensor is what bounds memory here, not the
+                        backbone, so this stays small.
+
+    Returns:
+        dict with ``all`` (every position) and ``nonpad`` (real bytes only).
+        Most packets are far shorter than L, so ``all`` reads high on predicting
+        <pad> alone -- ``nonpad`` is the number that moves.
+    """
+    correct = total = 0
+    correct_nonpad = total_nonpad = 0
+    for i in range(0, latents.size(0), chunk):
+        ref = tokens[i:i + chunk].long()
+        pred = packet_decoder(latents[i:i + chunk], ref).argmax(dim=-1)
+        hit = pred == ref
+        correct += hit.sum().item()
+        total += hit.numel()
+        if pad_token_id is not None:
+            real = ref != pad_token_id
+            correct_nonpad += (hit & real).sum().item()
+            total_nonpad += real.sum().item()
+    return {"all": correct / max(total, 1),
+            "nonpad": correct_nonpad / max(total_nonpad, 1)
+                      if pad_token_id is not None else float("nan")}
+
+
+@torch.no_grad()
 def byte_level_reconstruction(seq_ae, packet_decoder, seq_lens, tokens,
-                              latents=None, pad_token_id=None, temperature=0.0):
+                              latents=None, pad_token_id=None, chunk: int = 64):
     """Eval-only: pipe reconstructed latents through the frozen packet decoder.
 
-    Returns byte-level accuracy against the original packets, directly
-    comparable to the packet-level AE numbers. No gradients flow here.
+    This is the metric that answers whether the flow bottleneck is good enough
+    for the frozen packet decoder to reproduce the packets -- unlike the masked
+    MSE, it is on a scale that means something (bytes) and it is comparable to
+    the packet-level AE's own accuracy on the same packets.
+
+    Pass cached ``latents`` to encode from and ``tokens`` as the byte reference;
+    padding slots are dropped rather than decoded. No gradients flow here.
+
+    Returns:
+        dict from :func:`decoder_byte_accuracy` (``all`` / ``nonpad``).
     """
     z, _ = seq_ae.encoder(seq_lens, tokens=tokens, latents=latents)
-    lat_hat = seq_ae.reconstruct_latents(z)                    # (B, P, D)
+    lat_hat = seq_ae.reconstruct_latents(z)                    # (B, P, D), un-normalised
     B, P, D = lat_hat.shape
-    gen = packet_decoder.generate(lat_hat.reshape(B * P, D),
-                                  temperature=temperature)     # (B*P, L')
-    ref = tokens.reshape(B * P, -1)
-    L = min(gen.size(1), ref.size(1))
-    gen, ref = gen[:, :L], ref[:, :L]
-
-    pkt_mask = build_padding_mask(seq_lens.view(-1), P).reshape(-1, 1)
-    byte_mask = pkt_mask.expand(-1, L)
-    if pad_token_id is not None:
-        byte_mask = byte_mask & (ref != pad_token_id)
-    return ((gen == ref) & byte_mask).sum().item() / byte_mask.sum().clamp_min(1).item()
+    m = build_padding_mask(seq_lens.view(-1), P).reshape(-1)
+    return decoder_byte_accuracy(packet_decoder,
+                                 lat_hat.reshape(B * P, D)[m],
+                                 tokens.reshape(B * P, -1)[m],
+                                 pad_token_id=pad_token_id, chunk=chunk)
 
 @torch.no_grad()
 def precompute_latents(packet_encoder, dataloader, device='cuda'):
