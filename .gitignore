@@ -15,6 +15,9 @@ temp
 
 # Rust stuff
 *Cargo.lock
+# ...except the extractor's, which is deliberately committed: the pre-merge forks had no
+# lockfile and drifted onto incompatible crate versions (see feature_extraction/MIGRATION.md §5).
+!feature_extraction/Cargo.lock
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

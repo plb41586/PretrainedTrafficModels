@@ -102,8 +102,22 @@ constants directly rather than adding argparse.
 Rust (`feature_extraction/`):
 ```
 cargo build --release            # from feature_extraction/
-cargo run --release -- --file <pcap> [--cache-payloads] [--graph-name <name>] [--pl-outfile <path>]
+cargo test                       # 15 unit tests, no database needed
+cargo run --release -- (--file <pcap> | --interface <name>) \
+    [--pl-outfile <path>] [--pl-chunk-size <n>] [--limit <n>] \
+    [--graph-name <name>] [--topology <path>] [--falkor-host <host:port>] \
+    [--cache-payloads] [--redis-host <host:port>]
 ```
+`cargo` lives at `~/.cargo/bin` and is only on `PATH` through the login shell, so container
+invocations need `bash -lc 'cargo ...'`.
+
+**Every backend is opt-in.** With no `--graph-name`, FalkorDB is never contacted; with no
+`--cache-payloads`, Redis is never contacted; with no `--pl-outfile`, nothing is exported.
+Omitting both `--file` and `--interface` exits 2 — there is no default input path. This repo
+only uses the Parquet path (there is no FalkorDB service in the compose file and no topology
+TOML), so the usual invocation is just `--file <pcap> --pl-outfile <path>`. `--limit N` stops
+after N packets and is the cheapest smoke test. See `feature_extraction/MIGRATION.md` for the
+full pre-merge → merged migration notes.
 
 Data splitting utilities (both take their config from constants at the bottom of the file):
 ```
@@ -113,9 +127,17 @@ python -m data_tools.SplitFlowsDF   # flow-level: whole flows per split, long fl
 `SplitFlowsDF` is the one to use for flow/sequence-level work — it keeps every flow in a single
 split, cutting only long-lived flows chronologically (train -> test -> val), and hits the ratios
 in packets. It assumes an attack-free capture (see its module docstring). It groups on a
-canonical conversation key derived in Python because the extractor's `flow_key` is directional
-and fragmented by `proto_hierarchy` (see `TODO.md`); the `flow_key` column itself is written out
-unchanged, so the latent-cache path is unaffected.
+canonical conversation key derived in Python, which was a workaround for the pre-merge
+extractor writing a directional `flow_key` fragmented by `proto_hierarchy`. The merged
+extractor writes a normalized key carrying only the transport token, so for parquets extracted
+with it the canonicalization is a redundant no-op that maps each `flow_key` to itself. It is
+kept because `data_artefacts/` still holds pre-merge parquets. The `flow_key` column is written
+out unchanged either way, so the latent-cache path is unaffected.
+
+**Do not mix key formats within one artefact lineage.** Re-extracting a capture changes its
+`flow_key` strings, so its split and any latent cache keyed on them
+(`flow_split/latents_*`) must be regenerated together — the `flow_key` asserts in
+`CheckLatentCache.py` and `SequenceLevelAutoEncoder.py` are what catch a mismatch.
 
 ## Architecture: model components
 
