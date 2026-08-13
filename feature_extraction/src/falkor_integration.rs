@@ -1,333 +1,303 @@
-use etherparse::err::ip;
-use falkordb::{FalkorClientBuilder, FalkorConnectionInfo, FalkorSyncClient, SyncGraph};
-use crate::feature_parser::{ParsedPacketSet};
+use falkordb::{FalkorClientBuilder, FalkorConnectionInfo, FalkorSyncClient, FalkorValue, SyncGraph};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv6Addr};
+use std::time::Duration;
+
 use crate::flow_tracker::{FlowKey, FlowStats};
-use std::net::IpAddr;
 
-pub fn connect_to_falkor() -> FalkorSyncClient {
-    // Initialize the Falkor client
-    let connection_info: FalkorConnectionInfo = "falkor://falkordb:6379"
+// --- Connection ---
+
+/// Connect to FalkorDB. `host` is a `host:port` pair, e.g. `falkordb:6379`.
+pub fn connect_to_falkor(host: &str) -> FalkorSyncClient {
+    let url = format!("falkor://{host}");
+    let connection_info: FalkorConnectionInfo = url
+        .as_str()
         .try_into()
-        .expect("Invalid connection info");
+        .unwrap_or_else(|e| panic!("Invalid FalkorDB connection info {url:?}: {e}"));
 
-    let client = FalkorClientBuilder::new()
+    FalkorClientBuilder::new()
         .with_connection_info(connection_info)
+        // Keepalive for a long-lived flow-tracking client sitting behind NAT /
+        // stateful firewalls. TCP-only; no effect on Unix-socket/embedded paths.
+        .with_tcp_keepalive(Duration::from_secs(30))
         .build()
-        .expect("Failed to build client");
-    
-    return client;
+        .unwrap_or_else(|e| panic!("Failed to connect to FalkorDB at {host}: {e}"))
 }
 
-pub fn insert_from_flow_tracker(
-    graph: &mut SyncGraph,
-    key: &crate::flow_tracker::FlowKey,
-    stats: &crate::flow_tracker::FlowStats
-) -> Result<(), String> {
-    let mut ip_version: &str;
-    if key.src_ip.is_ipv4() {
-        ip_version = "IPv4";
-    } else if key.src_ip.is_ipv6() {
-        ip_version = "IPv6";
-    } else {
-        ip_version = "Unknown";
-        return Err("Source IP is neither IPv4 nor IPv6".to_string());
+// --- Shared helpers ---
+
+fn ip_label(ip: &IpAddr) -> &'static str {
+    match ip {
+        IpAddr::V4(_) => "IPv4",
+        IpAddr::V6(_) => "IPv6",
     }
-    
-    // Convert duration to milliseconds for storage
-    let duration_ms = stats.duration.as_millis() as u64;
-    
-    // Merge Nodes and Relationship from FlowKey with FlowStats properties
-    let merge_node_query = format!(
-        r#"MERGE (s:{} {{ address: '{}'}})
-        MERGE (d:{} {{ address: '{}' }})
-        MERGE (s)-[r:`{}` {{ 
-            src_port: {}, 
-            dst_port: {},
-            fwd_packet_count: {},
-            bwd_packet_count: {},
-            fwd_byte_count: {},
-            bwd_byte_count: {},
-            first_seen: {},
-            last_seen: {},
-            duration_ms: {},
-            min_packet_size: {},
-            max_packet_size: {},
-            avg_packet_size: {},
-            avg_pps: {},
-            avg_bps: {}
-        }}]->(d)"#,
-        ip_version,
-        key.src_ip,
-        ip_version,
-        key.dst_ip,
-        key.protocol,
-        key.src_port,
-        key.dst_port,
-        stats.fwd_packet_count,
-        stats.bwd_packet_count,
-        stats.fwd_byte_count,
-        stats.bwd_byte_count,
-        stats.first_seen.as_secs(),
-        stats.last_seen.as_secs(),
-        duration_ms,
-        stats.min_packet_size,
-        stats.max_packet_size,
-        stats.avg_packet_size,
-        stats.avg_pps,
-        stats.avg_bps
-    );
-    
-    graph
-        .query(merge_node_query)
-        .with_timeout(5000)
-        .execute()
-        .expect("Failed to create nodes");
-    
-    Ok(())
 }
 
-pub fn insert_edge_only(
-    graph: &mut SyncGraph,
-    key: &crate::flow_tracker::FlowKey,
-    stats: &crate::flow_tracker::FlowStats
-) -> Result<(), String> {
-    let ip_version: &str;
-    if key.src_ip.is_ipv4() {
-        ip_version = "IPv4";
-    } else if key.src_ip.is_ipv6() {
-        ip_version = "IPv6";
-    } else {
-        return Err("Source IP is neither IPv4 nor IPv6".to_string());
-    }
-    
-    // Convert duration to milliseconds for storage
-    let duration_ms = stats.duration.as_millis() as u64;
-    
-    // Create relationship between existing nodes
-    let create_edge_query = format!(
-        r#"MATCH (s:{} {{ address: '{}'}})
-        MATCH (d:{} {{ address: '{}' }})
-        CREATE (s)-[r:`{}` {{ 
-            src_port: {}, 
-            dst_port: {},
-            fwd_packet_count: {},
-            bwd_packet_count: {},
-            fwd_byte_count: {},
-            bwd_byte_count: {},
-            first_seen: {},
-            last_seen: {},
-            duration_ms: {},
-            min_packet_size: {},
-            max_packet_size: {},
-            avg_packet_size: {},
-            avg_pps: {},
-            avg_bps: {}
-        }}]->(d)"#,
-        ip_version,
-        key.src_ip,
-        ip_version,
-        key.dst_ip,
-        key.protocol,
-        key.src_port,
-        key.dst_port,
-        stats.fwd_packet_count,
-        stats.bwd_packet_count,
-        stats.fwd_byte_count,
-        stats.bwd_byte_count,
-        stats.first_seen.as_secs(),
-        stats.last_seen.as_secs(),
-        duration_ms,
-        stats.min_packet_size,
-        stats.max_packet_size,
-        stats.avg_packet_size,
-        stats.avg_pps,
-        stats.avg_bps
-    );
-    
-    graph
-        .query(create_edge_query)
-        .with_timeout(5000)
-        .execute()
-        .map_err(|e| format!("Failed to create edge: {}", e))?;
-    
-    Ok(())
-}
-
-pub fn update_existing_edge(
-    graph: &mut SyncGraph,
-    key: &crate::flow_tracker::FlowKey,
-    stats: &crate::flow_tracker::FlowStats
-) -> Result<(), String> {
-    let ip_version: &str;
-    if key.src_ip.is_ipv4() {
-        ip_version = "IPv4";
-    } else if key.src_ip.is_ipv6() {
-        ip_version = "IPv6";
-    } else {
-        return Err("Source IP is neither IPv4 nor IPv6".to_string());
-    }
-    
-    // Convert duration to milliseconds for storage
-    let duration_ms = stats.duration.as_millis() as u64;
-    
-    // Update existing relationship properties
-    let update_edge_query = format!(
-        r#"MATCH (s:{} {{ address: '{}'}})
-        -[r:`{}` {{ src_port: {}, dst_port: {} }}]->
-        (d:{} {{ address: '{}' }})
-        SET r.fwd_packet_count = {},
-            r.bwd_packet_count = {},
-            r.fwd_byte_count = {},
-            r.bwd_byte_count = {},
-            r.first_seen = {},
-            r.last_seen = {},
-            r.duration_ms = {},
-            r.min_packet_size = {},
-            r.max_packet_size = {},
-            r.avg_packet_size = {},
-            r.avg_pps = {},
-            r.avg_bps = {}"#,
-        ip_version,
-        key.src_ip,
-        key.protocol,
-        key.src_port,
-        key.dst_port,
-        ip_version,
-        key.dst_ip,
-        stats.fwd_packet_count,
-        stats.bwd_packet_count,
-        stats.fwd_byte_count,
-        stats.bwd_byte_count,
-        stats.first_seen.as_secs(),
-        stats.last_seen.as_secs(),
-        duration_ms,
-        stats.min_packet_size,
-        stats.max_packet_size,
-        stats.avg_packet_size,
-        stats.avg_pps,
-        stats.avg_bps
-    );
-    
-    graph
-        .query(update_edge_query)
-        .with_timeout(5000)
-        .execute()
-        .map_err(|e| format!("Failed to update edge: {}", e))?;
-    
-    Ok(())
-}
-
-pub fn merge_ip_address(
-    graph: &mut SyncGraph,
-    ip_addr: &IpAddr
-) -> Result<(), String> {
-    let (ip_version, ip_type) = match ip_addr {
-        IpAddr::V4(ipv4) => {
-            let is_private = ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local();
-            ("IPv4", if is_private { "internal" } else { "external" })
-        },
-        IpAddr::V6(ipv6) => {
-            let is_private = ipv6.is_loopback() ||           
-                           ipv6.is_unicast_link_local() ||   
-                           is_ipv6_unique_local(ipv6) ||
-                           ipv6.is_multicast();              // Multicast addresses
-            ("IPv6", if is_private { "internal" } else { "external" })
+fn ip_scope(ip: &IpAddr) -> &'static str {
+    let is_private = match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unicast_link_local()
+                || is_ipv6_unique_local(v6)
+                || v6.is_multicast()
         }
     };
-    
-    let merge_ip_query = format!(
-        r#"MERGE (ip:{} {{ address: '{}', type: '{}' }})"#,
-        ip_version,
-        ip_addr,
-        ip_type
+    if is_private { "internal" } else { "external" }
+}
+
+/// True for the unique-local range fc00::/7 — the top 7 bits masked by 0xfe00.
+fn is_ipv6_unique_local(ipv6: &Ipv6Addr) -> bool {
+    (ipv6.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// Single source of truth for flow-edge properties. Emits native typed
+/// `FalkorValue`s — ints stay ints, floats stay floats. No stringification.
+fn flow_edge_params(key: &FlowKey, stats: &FlowStats) -> HashMap<String, FalkorValue> {
+    let mut params: HashMap<String, FalkorValue> = HashMap::with_capacity(32);
+
+    // Endpoint identity — plain strings; client escapes them.
+    params.insert("src_ip".into(), key.src_ip.to_string().into());
+    params.insert("dst_ip".into(), key.dst_ip.to_string().into());
+
+    // Edge identity.
+    params.insert("src_port".into(), (key.src_port as i64).into());
+    params.insert("dst_port".into(), (key.dst_port as i64).into());
+
+    // The full protocol stack, e.g. "Ethernet->VLAN (802.1Q)->IPv4->TCP->MQTT".
+    // This travels as a parameter precisely because it can contain spaces,
+    // parentheses and other characters that are unsafe to interpolate.
+    params.insert("proto_hierarchy".into(), stats.proto_hierarchy.clone().into());
+
+    // Counters.
+    params.insert("fwd_packet_count".into(), (stats.fwd_packet_count as i64).into());
+    params.insert("bwd_packet_count".into(), (stats.bwd_packet_count as i64).into());
+    params.insert("fwd_byte_count".into(), (stats.fwd_byte_count as i64).into());
+    params.insert("bwd_byte_count".into(), (stats.bwd_byte_count as i64).into());
+
+    // Timing.
+    params.insert("first_seen".into(), (stats.first_seen.as_secs() as i64).into());
+    params.insert("last_seen".into(), (stats.last_seen.as_secs() as i64).into());
+    params.insert("duration_ms".into(), (stats.duration().as_millis() as i64).into());
+
+    // Size extrema.
+    params.insert("min_packet_size".into(), (stats.min_packet_size as i64).into());
+    params.insert("max_packet_size".into(), (stats.max_packet_size as i64).into());
+
+    // Derived values consumed by downstream ML — real floats, computed on
+    // demand from the counters rather than read from a cached field.
+    params.insert("avg_packet_size".into(), (stats.avg_packet_size() as f64).into());
+    params.insert("avg_pps".into(), (stats.avg_pps() as f64).into());
+    params.insert("avg_bps".into(), (stats.avg_bps() as f64).into());
+
+    // Entropy stats — f32 widened to f64 so they land as native float
+    // FalkorValues (FalkorValue has no f32 path).
+    params.insert("fwd_packet_entropy_agg".into(), (stats.fwd_packet_entropy_agg as f64).into());
+    params.insert("fwd_min_packet_entropy".into(), (stats.fwd_min_packet_entropy as f64).into());
+    params.insert("fwd_max_packet_entropy".into(), (stats.fwd_max_packet_entropy as f64).into());
+    params.insert("bwd_packet_entropy_agg".into(), (stats.bwd_packet_entropy_agg as f64).into());
+    params.insert("bwd_min_packet_entropy".into(), (stats.bwd_min_packet_entropy as f64).into());
+    params.insert("bwd_max_packet_entropy".into(), (stats.bwd_max_packet_entropy as f64).into());
+
+    params
+}
+
+/// Write a flow edge between two existing IP nodes, creating it if absent and
+/// refreshing its properties if present. Assumes the nodes were already created
+/// via `merge_ip_address`.
+///
+/// `MERGE` rather than `CREATE`: re-running the extractor over the same capture
+/// and graph name updates the existing edges instead of duplicating every one
+/// of them. The edge is identified by its endpoints, relationship type and port
+/// pair; everything else is set on each write.
+pub fn insert_flow_edge(
+    graph: &mut SyncGraph,
+    key: &FlowKey,
+    stats: &FlowStats,
+) -> Result<(), String> {
+    let protocol = validate_protocol(key.protocol.as_str())?;
+    let src_label = ip_label(&key.src_ip);
+    let dst_label = ip_label(&key.dst_ip);
+
+    let query = format!(
+        "MATCH (s:{src_label} {{ address: $src_ip }})
+         MATCH (d:{dst_label} {{ address: $dst_ip }})
+         MERGE (s)-[r:`{protocol}` {{ src_port: $src_port, dst_port: $dst_port }}]->(d)
+         {set_block}",
+        set_block = EDGE_SET_BLOCK,
     );
-    
+
+    let params = flow_edge_params(key, stats);
+
     graph
-        .query(merge_ip_query)
+        .query(&query)
+        .with_params(params)
+        .with_timeout(5000)
+        .execute()
+        .map_err(|e| format!("Failed to write edge: {}", e))?;
+
+    Ok(())
+}
+
+/// Ensure an IP node exists with the right label and `type` property.
+pub fn merge_ip_address(graph: &mut SyncGraph, ip_addr: &IpAddr) -> Result<(), String> {
+    let label = ip_label(ip_addr);
+    let scope = ip_scope(ip_addr);
+
+    let query = format!("MERGE (ip:{label} {{ address: $address, type: $type }})");
+
+    let mut params: HashMap<String, FalkorValue> = HashMap::with_capacity(2);
+    params.insert("address".into(), ip_addr.to_string().into());
+    params.insert("type".into(), scope.into());
+
+    graph
+        .query(&query)
+        .with_params(params)
         .with_timeout(5000)
         .execute()
         .map_err(|e| format!("Failed to merge IP address: {}", e))?;
-    
+
     Ok(())
 }
 
-fn is_ipv6_unique_local(ipv6: &std::net::Ipv6Addr) -> bool {
-    let segments = ipv6.segments();
-    (segments[0] & 0xfe00) == 0xfc00
+/// The `SET` block applied on every edge write. Kept as a `const` so the
+/// property list cannot drift from `flow_edge_params`.
+const EDGE_SET_BLOCK: &str = "SET r.proto_hierarchy = $proto_hierarchy,
+        r.fwd_packet_count = $fwd_packet_count,
+        r.bwd_packet_count = $bwd_packet_count,
+        r.fwd_byte_count = $fwd_byte_count,
+        r.bwd_byte_count = $bwd_byte_count,
+        r.first_seen = $first_seen,
+        r.last_seen = $last_seen,
+        r.duration_ms = $duration_ms,
+        r.min_packet_size = $min_packet_size,
+        r.max_packet_size = $max_packet_size,
+        r.avg_packet_size = $avg_packet_size,
+        r.avg_pps = $avg_pps,
+        r.avg_bps = $avg_bps,
+        r.fwd_packet_entropy_agg = $fwd_packet_entropy_agg,
+        r.fwd_min_packet_entropy = $fwd_min_packet_entropy,
+        r.fwd_max_packet_entropy = $fwd_max_packet_entropy,
+        r.bwd_packet_entropy_agg = $bwd_packet_entropy_agg,
+        r.bwd_min_packet_entropy = $bwd_min_packet_entropy,
+        r.bwd_max_packet_entropy = $bwd_max_packet_entropy";
+
+/// Cypher cannot parameterise a relationship type, so it must be interpolated.
+/// `FlowKey::protocol` is a closed enum whose `as_str` values are all plain
+/// ASCII identifiers, which makes that safe — this check enforces the invariant
+/// so a future variant cannot quietly reintroduce injectable text.
+///
+/// Note the *protocol hierarchy* — the free-form string that can contain spaces
+/// and parentheses, e.g. "Ethernet->VLAN (802.1Q)->TCP" — never reaches this
+/// function. It is written as a parameter, so packets carrying VLAN, MPLS,
+/// PPPoE or Profinet tags are stored rather than rejected.
+fn validate_protocol(protocol: &str) -> Result<&str, String> {
+    if protocol.is_empty() || protocol.len() > 64 {
+        return Err(format!("Invalid relationship type length: {:?}", protocol));
+    }
+    if !protocol.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!(
+            "Relationship type contains disallowed characters: {:?}",
+            protocol
+        ));
+    }
+    Ok(protocol)
 }
 
-pub fn basic_falkor_test() {
-    // Initialize the Falkor client
-    let connection_info: FalkorConnectionInfo = "falkor://falkordb:6379"
-        .try_into()
-        .expect("Invalid connection info");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flow_tracker::FlowProtocol;
 
-    let client = FalkorClientBuilder::new()
-        .with_connection_info(connection_info)
-        .build()
-        .expect("Failed to build client");
+    #[test]
+    fn every_flow_protocol_is_a_valid_relationship_type() {
+        for p in [
+            FlowProtocol::Arp,
+            FlowProtocol::Icmpv4,
+            FlowProtocol::Icmpv6,
+            FlowProtocol::Tcp,
+            FlowProtocol::Udp,
+        ] {
+            assert!(
+                validate_protocol(p.as_str()).is_ok(),
+                "{} must be usable as a relationship type",
+                p
+            );
+        }
+    }
 
-    // // Select the social graph
-    // let mut graph = client.select_graph("test1");
+    #[test]
+    fn protocol_validator_rejects_garbage() {
+        assert!(validate_protocol("").is_err());
+        assert!(validate_protocol("foo`bar").is_err());
+        assert!(validate_protocol("foo}) CREATE (x)").is_err());
+        assert!(validate_protocol("has spaces").is_err());
+        assert!(validate_protocol(&"a".repeat(200)).is_err());
+    }
 
-    // // Create 100 nodes and return a handful
-    // let mut nodes = graph.query("UNWIND range(0, 100) AS i CREATE (n { v:1 }) RETURN n LIMIT 10")
-    //             .with_timeout(5000)
-    //             .execute()
-    //             .expect("Failed executing query");
+    #[test]
+    fn ip_label_is_per_address() {
+        let v4: IpAddr = "1.2.3.4".parse().unwrap();
+        let v6: IpAddr = "::1".parse().unwrap();
+        assert_eq!(ip_label(&v4), "IPv4");
+        assert_eq!(ip_label(&v6), "IPv6");
+    }
 
-    // // Can also be collected, like any other iterator
-    // while let Some(node) = nodes.data.next() {
-    //    println ! ("{:?}", node);
-    // }
-    // Select the test graph
-    let mut graph = client.select_graph("test1");
+    #[test]
+    fn mixed_family_flows_label_each_endpoint_separately() {
+        // The bug this guards: taking the label from the source address and
+        // applying it to both nodes, so the destination MATCH never matches and
+        // the edge is silently dropped.
+        let v4: IpAddr = "192.168.1.1".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_ne!(ip_label(&v4), ip_label(&v6));
+    }
 
-    // Create 10 nodes (fixed: no concat function)
-    let create_nodes_query = r#"
-       UNWIND range(1, 10) AS i
-       CREATE (n:Person { 
-           id: i, 
-           name: 'Person_' + toString(i), 
-           age: 20 + i, 
-           active: i % 2 = 0 
-       })
-   "#;
+    #[test]
+    fn ip_scope_classification() {
+        let private: IpAddr = "192.168.4.4".parse().unwrap();
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        let ula: IpAddr = "fd00::1".parse().unwrap();
+        let global6: IpAddr = "2001:db8::1".parse().unwrap();
 
-    graph
-        .query(create_nodes_query)
-        .with_timeout(5000)
-        .execute()
-        .expect("Failed to create nodes");
+        assert_eq!(ip_scope(&private), "internal");
+        assert_eq!(ip_scope(&public), "external");
+        assert_eq!(ip_scope(&ula), "internal");
+        assert_eq!(ip_scope(&global6), "external");
+    }
 
-    // Create edges connecting each node to the next
-    let create_edges_query = r#"
-       UNWIND range(1, 9) AS i
-       MATCH (a:Person {id: i}), (b:Person {id: i + 1})
-       CREATE (a)-[:KNOWS]->(b)
-   "#;
+    #[test]
+    fn edge_set_block_covers_every_parameter_it_names() {
+        // Guards drift between EDGE_SET_BLOCK and flow_edge_params: every
+        // $placeholder in the SET block must be produced by the params builder.
+        use crate::feature_parser::TimeStamp;
 
-    graph
-        .query(create_edges_query)
-        .with_timeout(5000)
-        .execute()
-        .expect("Failed to create edges");
+        let key = FlowKey::new(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            1234,
+            80,
+            FlowProtocol::Tcp,
+        );
+        let stats = FlowStats::new(
+            true,
+            100,
+            TimeStamp::new(1, 0),
+            0.5,
+            "Ethernet->IPv4->TCP".to_string(),
+        );
+        let params = flow_edge_params(&key, &stats);
 
-    // Return all nodes and their outgoing relationships
-    let return_query = r#"
-       MATCH (n:Person)
-       OPTIONAL MATCH (n)-[r:KNOWS]->(m)
-       RETURN n, r, m
-       LIMIT 20
-   "#;
-
-    let mut results = graph
-        .query(return_query)
-        .with_timeout(5000)
-        .execute()
-        .expect("Failed executing return query");
-
-    while let Some(record) = results.data.next() {
-        println!("{:?}", record);
+        for token in EDGE_SET_BLOCK.split('$').skip(1) {
+            let name: String = token
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            assert!(
+                params.contains_key(&name),
+                "SET block references ${} but flow_edge_params does not produce it",
+                name
+            );
+        }
     }
 }

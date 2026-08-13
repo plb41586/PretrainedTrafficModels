@@ -1,7 +1,8 @@
 [package]
 name = "feature_extractor"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.88"
 
 [dependencies]
 pcap = "2.2.0"
@@ -12,9 +13,10 @@ redis = "0.27.2"
 rmp-serde = "1.3.0"
 serde = { version = "1.0.210", features = ["derive"] }
 libc = "0.2.174"
-falkordb = { version = "0.1.10" }
+falkordb = "0.10.1"
 simple-dns = { version = "0.11.0" }
 rustc-hash = "2.1.1"
 toml = "0.8"
+entropy = "0.4.3"
 clap = { version = "4", features = ["derive"] }
-polars = { version = "0.53.0", features = ["parquet"] }
+polars = { version = "0.53.0", features = ["parquet", "dtype-u8"] }

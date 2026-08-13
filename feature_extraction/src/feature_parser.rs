@@ -1,9 +1,8 @@
 use byteorder::{BigEndian, ReadBytesExt};
-use simple_dns::{Packet as DnsPacket, Question as DNSQuestion};
+use simple_dns::Packet as DnsPacket;
 use etherparse::{
-    err::{self, ip},
-    Icmpv4Slice, Icmpv6Header, InternetSlice, PacketHeaders, SlicedPacket, TcpHeader,
-    TransportHeader, UdpHeader, TransportSlice, TcpSlice, UdpSlice,
+    err::{self},
+    Icmpv4Slice, Icmpv6Header, PacketHeaders, SlicedPacket, TcpHeader, TransportSlice, UdpHeader,
 };
 use pcap::Packet;
 use redis::{FromRedisValue, RedisError, RedisResult, RedisWrite, ToRedisArgs, Value};
@@ -19,8 +18,6 @@ use thiserror::Error;
 use libc::timeval;
 use std::collections::HashMap;
 use std::time::Duration;
-
-use crate::feature_parser;
 
 #[derive(Error, Debug)]
 pub enum ParserError {
@@ -47,7 +44,7 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
     // Begin parsing the packet
     let ether_type = parse_ether_type(packet)?;
     let eth_slice = SlicedPacket::from_ethernet(packet.data)?;
-    let eth_header = PacketHeaders::from_ethernet_slice(packet.data)?;
+    let _eth_header = PacketHeaders::from_ethernet_slice(packet.data)?;
 
     // Set payload set information for Ethernet header
     parsed_packet.payload_set.header_len = 14; // Ethernet header length is 14 bytes
@@ -98,6 +95,7 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
     let mut transport_payload: Vec<u8> = Vec::new();
     let transport_protocol = match transport {
         TransportSlice::Icmpv4(_) => {
+            parsed_packet.features.transport_protocol = TransportProtocol::ICMPv4;
             if let Ok(transport_features) = get_icmp_v4_features(packet) {
                 parsed_packet.features.icmp_features = transport_features;
                 parsed_packet.features.icmp_set = true;
@@ -111,6 +109,7 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
             TransportProtocol::ICMPv4
         }
         TransportSlice::Icmpv6(_) => {
+            parsed_packet.features.transport_protocol = TransportProtocol::ICMPv6;
             if let Ok(transport_features) = get_icmp_v6_features(packet) {
                 parsed_packet.features.icmp_features = transport_features;
                 parsed_packet.features.icmp_set = true;
@@ -124,6 +123,7 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
             TransportProtocol::ICMPv6
         }
         TransportSlice::Tcp(tcp_slice) => {
+            parsed_packet.features.transport_protocol = TransportProtocol::TCP;
             let tcp_header = tcp_slice.to_header();
             if let Ok(()) = parse_tcp_layer(&tcp_header, &eth_slice, &mut parsed_packet) {
                 parsed_packet.features.tcp_set = true;
@@ -140,6 +140,7 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
         }
         TransportSlice::Udp(udp_slice) => {
             let udp_header = udp_slice.to_header();
+            parsed_packet.features.transport_protocol = TransportProtocol::UDP;
             if let Ok(()) = get_udp_features(&udp_header, &mut parsed_packet) {
                 parsed_packet.features.udp_set = true;
                 dest_port = parsed_packet.features.udp_features.udp_port_dst;
@@ -161,10 +162,11 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
 
     match application_protocol_candidate {
         ApplicationProtocol::DNS => {
+            parsed_packet.features.application_protocol = ApplicationProtocol::DNS;
             // Dummy Timestamp for DNS context
             let mut dns_context = DnsContext::new();
-            if let Ok(DNS_features) = parse_dns(&transport_payload, 1000, &mut dns_context) {
-                parsed_packet.features.DNS_features = DNS_features;
+            if let Ok(dns_features) = parse_dns(&transport_payload, 1000, &mut dns_context) {
+                parsed_packet.features.DNS_features = dns_features;
                 // adapt payload set
                 parsed_packet.payload_set.header_len = parsed_packet.payload_set.header_len + 12; // DNS header length is 12 bytes
                 parsed_packet
@@ -174,10 +176,11 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
             }
         }
         ApplicationProtocol::MDNS => {
+            parsed_packet.features.application_protocol = ApplicationProtocol::MDNS;
             // Dummy Timestamp for DNS context
             let mut dns_context = DnsContext::new();
-            if let Ok(DNS_features) = parse_dns(&transport_payload, 1000, &mut dns_context) {
-                parsed_packet.features.DNS_features = DNS_features;
+            if let Ok(dns_features) = parse_dns(&transport_payload, 1000, &mut dns_context) {
+                parsed_packet.features.DNS_features = dns_features;
                 // adapt payload set
                 parsed_packet.payload_set.header_len = parsed_packet.payload_set.header_len + 12; // DNS header length is 12 bytes
                 parsed_packet
@@ -188,6 +191,7 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
             }
         }
         ApplicationProtocol::MQTT => {
+            parsed_packet.features.application_protocol = ApplicationProtocol::MQTT;
             if let Ok(()) = parse_mqtt(transport_payload, &mut parsed_packet) {
                 parsed_packet
                     .payload_set
@@ -196,6 +200,7 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
             }
         }
         ApplicationProtocol::MBTCP => {
+            parsed_packet.features.application_protocol = ApplicationProtocol::MBTCP;
             if let Ok(mbtcp_features) = parse_modbus_tcp(transport_payload) {
                 parsed_packet.features.modbus_tcp_features = mbtcp_features;
                 if parsed_packet.payload_set.data.len()
@@ -211,6 +216,7 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
             }
         }
         ApplicationProtocol::HTTP => {
+            parsed_packet.features.application_protocol = ApplicationProtocol::HTTP;
             if let Ok(()) = parse_http(transport_payload, &mut parsed_packet) {
                 parsed_packet
                     .payload_set
@@ -219,6 +225,7 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
             }
         }
         ApplicationProtocol::HTTPS => {
+            parsed_packet.features.application_protocol = ApplicationProtocol::HTTPS;
             if let Ok(()) = parse_http(transport_payload, &mut parsed_packet) {
                 parsed_packet
                     .payload_set
@@ -227,6 +234,7 @@ pub fn parse_packet(packet: &Packet) -> Result<ParsedPacketSet, ParserError> {
             }
         }
         ApplicationProtocol::SSH => {
+            parsed_packet.features.application_protocol = ApplicationProtocol::SSH;
             parsed_packet
                 .payload_set
                 .proto_hierarchy
@@ -787,7 +795,7 @@ pub fn parse_dns(
 fn check_retransmission(
     query_key: &str,
     current_timestamp: u32,
-    current_id: u16,
+    _current_id: u16,
     context: &DnsContext,
 ) -> (bool, Option<u32>) {
     if let Some(&(prev_timestamp, _prev_id)) = context.previous_queries.get(query_key) {
@@ -825,7 +833,7 @@ pub struct MqttFeatures {
 }
 fn parse_mqtt(payload: Vec<u8>, parsed_packet: &mut ParsedPacketSet) -> Result<(), MqttError> {
     let mut cursor = Cursor::new(&payload);
-    let header_len_fallback = payload.len();
+    let _header_len_fallback = payload.len();
     
     if payload.is_empty() {
         parsed_packet.payload_set.header_len = parsed_packet.payload_set.data.len() as u32;
@@ -847,7 +855,7 @@ fn parse_mqtt(payload: Vec<u8>, parsed_packet: &mut ParsedPacketSet) -> Result<(
     parsed_packet.features.mqtt_features.mqtt_len = mqtt_len;
     
     // Save cursor position after fixed header
-    let fixed_header_end = cursor.position() as usize;
+    let _fixed_header_end = cursor.position() as usize;
     
     // Parse variable header and payload based on message type
     match msgtype {
@@ -866,6 +874,7 @@ fn parse_mqtt(payload: Vec<u8>, parsed_packet: &mut ParsedPacketSet) -> Result<(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn mqtt_fixed_header_length(packet: &[u8]) -> Option<usize> {
     if packet.is_empty() {
         return None; // Empty packet
@@ -1162,6 +1171,7 @@ fn parse_http(
 }
 
 // Combined feature struct plus placeholder initialization
+#[allow(non_snake_case)] // field name is part of the msgpack wire format
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProtocolFeatureSet {
     pub arp_set: bool,
@@ -1270,6 +1280,34 @@ impl ProtocolFeatureSet {
     }
 }
 
+impl ToRedisArgs for ProtocolFeatureSet {
+    fn write_redis_args<W>(&self, out: &mut W)
+    where
+        W: ?Sized + RedisWrite,
+    {
+        let serialized = to_vec(self).expect("Serialization failed");
+        out.write_arg(&serialized);
+    }
+}
+
+impl FromRedisValue for ProtocolFeatureSet {
+    fn from_redis_value(v: &Value) -> RedisResult<Self> {
+        match *v {
+            Value::BulkString(ref bytes) => from_slice(bytes).map_err(|e| {
+                RedisError::from((
+                    redis::ErrorKind::ParseError,
+                    "Failed to deserialize ProtocolFeatureSet",
+                    e.to_string(),
+                ))
+            }),
+            _ => Err(RedisError::from((
+                redis::ErrorKind::TypeError,
+                "Expected binary data for ProtocolFeatureSet",
+            ))),
+        }
+    }
+}
+
 /// Represents a timestamp with second and microsecond precision.
 /// This is a wrapper around the `libc::timeval` structure used by libpcap,
 /// providing serialization support and a more idiomatic Rust interface.
@@ -1277,6 +1315,7 @@ impl ProtocolFeatureSet {
 pub struct TimeStamp {
     /// Seconds since Unix epoch (January 1, 1970)
     pub seconds: i64,
+    // Seconds since Unix epoch (January 1, 1970) 
     pub microseconds: i64,
 }
 
@@ -1294,6 +1333,7 @@ impl TimeStamp {
     }
     
     /// Returns the total timestamp as microseconds
+    #[allow(dead_code)]
     pub fn as_micros(&self) -> i64 {
         self.seconds * 1_000_000 + self.microseconds
     }
@@ -1388,9 +1428,11 @@ impl FromRedisValue for PayloadSet {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ParsedPacketSet {
-    pub timevalue: TimeStamp, 
+    pub timevalue: TimeStamp,
     pub features: ProtocolFeatureSet,
     pub payload_set: PayloadSet,
+    /// Canonical (direction-normalized) flow key this packet belongs to.
+    /// Filled in by the capture loop once the key is known; empty until then.
     pub flow_key: String,
 }
 

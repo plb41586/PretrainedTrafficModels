@@ -1,31 +1,36 @@
-use std::path::PathBuf;
+use std::path::Path;
+
 use pcap::{Capture, Device};
 
-pub fn setup_capture_from_file(file_name: &PathBuf) -> Capture<pcap::Offline> {
-    // Setup Capture from File
-    let cap = Capture::from_file(file_name).expect("Failed to open pcap file");
-    println!("Capture from Pcap file started!");
-    println!("Using file {}", file_name.display());
+pub fn setup_capture_from_file(file_name: &Path) -> Capture<pcap::Offline> {
+    let cap = Capture::from_file(file_name)
+        .unwrap_or_else(|e| panic!("Failed to open pcap file {}: {e}", file_name.display()));
+    println!("Capture from pcap file started: {}", file_name.display());
     cap
 }
 
+/// Open a live capture on the named interface.
 pub fn setup_capture(interface_name: &str) -> Capture<pcap::Active> {
-    // Get the Device List
-    let device_list = Device::list().expect("device list failed");
-    // Select device with given name
+    let device_list = Device::list().expect("Failed to list capture devices");
+    let available: Vec<String> = device_list.iter().map(|d| d.name.clone()).collect();
+
     let device = device_list
         .into_iter()
         .find(|d| d.name == interface_name)
-        .expect("device not found");
+        .unwrap_or_else(|| {
+            panic!(
+                "Capture device {:?} not found. Available devices: {}",
+                interface_name,
+                available.join(", ")
+            )
+        });
 
-    println!("Using device {}", device.name);
+    println!("Capture from network interface started: {}", device.name);
 
-    // Setup Capture from Network Interface
-    let cap = Capture::from_device(device)
-        .unwrap()
+    Capture::from_device(device)
+        .expect("Failed to open capture device")
         .promisc(true)
+        .snaplen(65535)
         .open()
-        .unwrap();
-    println!("Capture from Network Interface started!");
-    cap
+        .expect("Failed to activate capture")
 }

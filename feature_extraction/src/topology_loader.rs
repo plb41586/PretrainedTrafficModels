@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::fs;
-use falkordb::{FalkorClientBuilder, FalkorConnectionInfo, FalkorSyncClient, SyncGraph};
+use falkordb::SyncGraph;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 

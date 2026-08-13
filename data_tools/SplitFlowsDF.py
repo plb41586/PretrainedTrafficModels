@@ -21,23 +21,28 @@ per-attack parquets).
 
 Flow identity
 -------------
-The `flow_key` column written by the Rust extractor cannot be grouped on directly:
+The `flow_key` column written by the **pre-merge** Rust extractor could not be grouped on
+directly:
 
-  1. It is **not normalized**. `feature_extraction/src/main.rs:104-105` stringifies the key
-     built by `FlowKey::from_parsed_packet` (which ends in `Self::new`, not
-     `Self::new_normalized`); `key.normalize()` on the next line only feeds the FlowTracker
-     HashMap. So `A:59573 -> B:1883 (...)` and `B:1883 -> A:59573 (...)` are two keys for one
-     conversation.
-  2. Its protocol component is the **whole proto_hierarchy** (`flow_tracker.rs:24`), so one TCP
-     connection fragments into `... (Ethernet->IPv4->TCP)` for bare ACKs and
-     `... (Ethernet->IPv4->TCP->MQTT)` for payload-bearing packets.
+  1. It was **not normalized** — the key was stringified before `normalize()`, which only fed
+     the FlowTracker HashMap. So `A:59573 -> B:1883 (...)` and `B:1883 -> A:59573 (...)` were
+     two keys for one conversation.
+  2. Its protocol component was the **whole proto_hierarchy**, so one TCP connection fragmented
+     into `... (Ethernet->IPv4->TCP)` for bare ACKs and `... (Ethernet->IPv4->TCP->MQTT)` for
+     payload-bearing packets.
 
-Either defect would leak half a conversation across the split boundary. We therefore group on a
+Either defect leaks half a conversation across the split boundary. We therefore group on a
 canonical *conversation key* derived here in Python (see `conversation_key_map`), while writing
 the `flow_key` column out **untouched** — `PreTrainingDatasetHandler.build_flow_index`,
-`CachePacketLatents.py` and the existing latent caches keep working unchanged. Once the
-extractor is fixed (see TODO.md) this canonicalization collapses to a plain
-`group_by("flow_key")`.
+`CachePacketLatents.py` and the existing latent caches keep working unchanged.
+
+Both defects are **fixed in the merged extractor** (see `feature_extraction/MIGRATION.md` §4),
+which writes a normalized key whose parenthesised field is a bare transport token — `TCP`,
+`UDP`, `ARP`, `ICMPv4`, `ICMPv6`. On such a key this canonicalization is a correct no-op:
+the regex still parses it, `transport_prefix` returns the single token unchanged, and the
+endpoint ordering is direction-symmetric, so each `flow_key` maps to a distinct `conv_key`
+one-to-one. It is kept because `data_artefacts/` still holds pre-merge parquets; once none are
+in use it collapses to a plain `group_by("flow_key")` (see TODO.md).
 
 Run from the repo root, after editing the constants in the __main__ block:
     python -m data_tools.SplitFlowsDF
@@ -47,14 +52,17 @@ import json
 from pathlib import Path
 
 
-# `src_ip:src_port -> dst_ip:dst_port (proto_hierarchy)`. The greedy `.*` binds each port to
+# `src_ip:src_port -> dst_ip:dst_port (proto)`, where `proto` is a full proto_hierarchy on
+# pre-merge keys and a bare transport token on merged ones. The greedy `.*` binds each port to
 # the *last* colon of its endpoint, which is what lets IPv6 keys parse:
 #   `fe80::b067:5f59:5094:9ba5:0 -> ff02::fb:0 (Ethernet->IPv6->ICMPv6)`
 FLOW_KEY_RE = r"^(.*):(\d+) -> (.*):(\d+) \((.*)\)$"
 
 # Hierarchy tokens at which we stop when reducing a proto_hierarchy to its transport prefix,
 # so `Ethernet->IPv4->TCP` and `Ethernet->IPv4->TCP->MQTT` collapse to the same conversation.
-TRANSPORT_TOKENS = {"TCP", "UDP", "ICMP", "ICMPv6", "IGMP", "ARP"}
+# `ICMPv4` is the merged extractor's spelling; a hierarchy with no listed token is returned
+# unchanged by `transport_prefix`, so a bare merged token passes through either way.
+TRANSPORT_TOKENS = {"TCP", "UDP", "ICMP", "ICMPv4", "ICMPv6", "IGMP", "ARP"}
 
 SPLIT_NAMES = ("train", "test", "val")
 

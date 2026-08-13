@@ -2,31 +2,33 @@
 
 Cross-cutting work items that don't belong to a single script.
 
-## Rework the feature extractor's flow key (`feature_extraction/`)
+## Re-extract the packet parquets with the merged extractor (`feature_extraction/`)
 
-The `flow_key` string written into the packet parquets is not usable as a flow identity as-is.
-`data_tools/SplitFlowsDF.py` currently works around this by deriving a canonical conversation
-key in Python; fixing the items below makes that workaround redundant (it collapses to a plain
-`group_by("flow_key")`), but it requires re-extracting every pcap.
+The flow-key defects listed here previously — directional keys, the whole `proto_hierarchy`
+baked into the key, the disagreeing `normalized_key()`, and the `.unwrap()` that panicked the
+run on the first non-ARP/ICMP/TCP/UDP packet — are all **fixed** by the merged extractor
+(see `feature_extraction/MIGRATION.md`). What remains is the data-side follow-through.
 
-- [ ] **Write the normalized key.** `src/main.rs:104-105` builds the key with
-      `FlowKey::from_parsed_packet(...)` — which ends in `Self::new(...)`
-      (`src/flow_tracker.rs:309`), not `Self::new_normalized(...)` — and stringifies it *before*
-      `key.normalize()` on line 107. That `normalize()` only feeds the `FlowTracker` HashMap, so
-      the dumped key stays directional: `A:59573 -> B:1883 (…)` and `B:1883 -> A:59573 (…)` are
-      two keys for one conversation. Normalize before `to_string()`.
-- [ ] **Stop putting the whole proto_hierarchy in the key.** `FlowKey::to_string`
-      (`src/flow_tracker.rs:24`) prints `self.protocol`, and `from_parsed_packet` sets that to
-      `payload_set.proto_hierarchy.clone()`. So one TCP connection fragments into
-      `… (Ethernet->IPv4->TCP)` for bare ACKs/handshake and `… (Ethernet->IPv4->TCP->MQTT)` for
-      payload-bearing packets. Use the L4 protocol only — the full hierarchy is already its own
-      `proto_hierarchy` column.
-- [ ] **Fix or delete `FlowKey::normalized_key()`** (`src/flow_tracker.rs:31`). Its branch is
-      inverted relative to `normalize()` (`:322`) — it returns `self` unchanged on the
-      *already-normalized* path while printing `"Check for normalization before use!"`, and
-      swaps otherwise. Two functions, same job, disagreeing.
-- [ ] **`src/main.rs:104` `.unwrap()`s `from_parsed_packet`**, which returns `None` for anything
-      that is not ARP/ICMP/TCP/UDP — a single such packet panics the whole extraction run.
+- [ ] **Re-extract the pcaps.** Everything under `data_artefacts/` was written by the pre-merge
+      extractor and still carries old-format keys. The files are internally consistent, so this
+      is not urgent — `SplitFlowsDF`'s Python canonicalization already recovers the right
+      conversations from them.
+- [ ] **Regenerate splits and latent caches per capture, together.** Re-extracting changes the
+      `flow_key` strings, so a re-extracted parquet must not be paired with a split or a
+      `latents_*` cache built from the old one.
+- [ ] **Then simplify `SplitFlowsDF.py`.** Once no pre-merge parquet is still in use,
+      `conversation_key_map` / `transport_prefix` / `FLOW_KEY_RE` collapse to a plain
+      `group_by("flow_key")`. Until then they are a correct no-op on new keys, so leaving them
+      in costs only a little work per run.
+
+## Known gaps carried over from the merge
+
+- [ ] **VLAN, MPLS, PPPoE and Profinet frames are dropped** — `parse_packet` returns
+      `EthertypeNotImplemented` for any EtherType but IPv4, IPv6 and ARP, and counts the frame
+      as a parse error. On VLAN-segmented captures this can silently remove a large share of
+      traffic; watch the reported `parse errors` count.
+- [ ] **Flows never expire** — the flow table grows for the length of the capture. Fine for
+      batch pcap processing, a real constraint for long-running `--interface` capture.
 
 ## Documentation
 
