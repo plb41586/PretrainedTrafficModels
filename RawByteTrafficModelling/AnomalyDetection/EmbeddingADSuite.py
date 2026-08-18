@@ -22,6 +22,11 @@ are never calibrated on the rows they are scored against. Because `test` selecte
 checkpoint during training, these numbers are mildly optimistic; the final val run is what
 settles them.
 
+Any set that plays no role is dropped immediately after the roles are assigned -- not
+merely excluded from the metrics. Keeping it would put it in the projection figure as its
+own labelled cluster beside the attacks, and in scores.parquet, which is a look at
+held-out data even though no metric was computed from it.
+
 Two things to read the output with. First, `seq_len_only` is in the detector list on
 purpose: most attack exports are dominated by single-packet windows (DDoS_UDP_Flood is
 100% single-packet) while the normal splits have a median of 64, so a pooled AUROC largely
@@ -144,16 +149,25 @@ def pick_best_detector(metrics: pl.DataFrame) -> str:
 
     Ranked on mean pooled AUROC across the multi-packet bins rather than the pooled `all`
     number, because `all` is the one the length confound inflates.
+
+    NaN bins are dropped before averaging. A bin is NaN when too few normals exist at that
+    length to compare against (MIN_BIN_N), which is the common case here -- normal flows
+    are almost all ~64 packets, so only the 33-64 bin has data. Averaging without this
+    filter makes every detector's mean NaN and the ranking arbitrary: the "best" detector
+    then changes with the row order rather than with the scores.
     """
     multi_packet = [name for _, _, name in SEQ_LEN_BINS if name != "1"]
     ranked = (metrics
               .filter((pl.col("metric") == "auroc") & (pl.col("attack") == ev.POOLED)
                       & (pl.col("bin").is_in(multi_packet))
-                      & (pl.col("detector") != "seq_len_only"))
+                      & (pl.col("detector") != "seq_len_only")
+                      & pl.col("value").is_not_nan() & pl.col("value").is_not_null())
               .group_by("detector").agg(pl.col("value").mean().alias("mean_auroc"))
               .sort("mean_auroc", descending=True, nulls_last=True))
     if ranked.height and ranked["mean_auroc"][0] is not None:
         return ranked["detector"][0]
+    logger.warning("No length-matched bin has enough data to rank detectors; "
+                   "falling back to the last registry entry")
     return metrics["detector"].unique(maintain_order=True)[-1]
 
 
@@ -165,6 +179,23 @@ if N_MAX_PER_SET:
     logger.info(f"Subsampled to {X.shape[0]} rows ({N_MAX_PER_SET} per set)")
 
 masks = split_roles(meta, FIT_LABEL, CALIB_LABEL, EVAL_NEG_LABEL, ATTACK_SET, seed=SEED)
+
+# Drop every row that plays no role, before anything scores or plots it.
+#
+# This is what actually keeps the final split unspent. Excluding it from the metrics is
+# not enough: the projection figure subsamples all loaded rows and draws them coloured by
+# set, so an unused split would appear as its own labelled cluster next to the attacks,
+# with a second panel colouring it by anomaly score. That is a look at held-out data, and
+# it survives into report.html and scores.parquet for anyone to read afterwards.
+in_role = masks["fit"] | masks["calib"] | masks["eval_neg"] | masks["eval_pos"]
+if not in_role.all():
+    unused = sorted(set(meta["label"].to_numpy()[~in_role].tolist()))
+    keep = np.where(in_role)[0]
+    logger.info(f"Dropping {int((~in_role).sum())} rows that play no role in this run "
+                f"(labels {unused}) -- they are not scored, plotted or written out")
+    X, meta = X[keep], take_rows(meta, keep)
+    masks = split_roles(meta, FIT_LABEL, CALIB_LABEL, EVAL_NEG_LABEL, ATTACK_SET, seed=SEED)
+
 scores_path = f"{output_dir}/scores.parquet"
 
 # --- Fit + score ------------------------------------------------------------
