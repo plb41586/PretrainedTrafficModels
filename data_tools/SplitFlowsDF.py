@@ -435,8 +435,8 @@ def split_flows(
 if __name__ == "__main__":
 
     # Normal-only capture — see the SCOPE note in the module docstring.
-    DATA_FILE = "data_artefacts/IIoTset-Ferrag/NormalMerged.parquet"
-    OUTPUT_DIR = "data_artefacts/IIoTset-Ferrag/flow_split"
+    DATA_FILE = "data_artefacts/merged_extractor/IIoTset-Ferrag/NormalMerged.parquet"
+    OUTPUT_DIR = "data_artefacts/merged_extractor/IIoTset-Ferrag/flow_split"
     TRAIN_SIZE = 0.70
     TEST_SIZE = 0.15
     VAL_SIZE = 0.15

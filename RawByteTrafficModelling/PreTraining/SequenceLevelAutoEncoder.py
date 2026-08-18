@@ -38,6 +38,7 @@ from RawByteTrafficModelling.ModelComponents.DataUtils import (
     load_latent_cache,
 )
 from RawByteTrafficModelling.ModelComponents.BackBones import MambaBackboneParams
+from RawByteTrafficModelling.PreTraining.RunConfig import DATASETS
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -49,7 +50,7 @@ import math
 import csv
 import os
 
-RUN_NAME = "SeqAE_EdgeIIoT_Mamba"
+RUN_NAME = "SeqAE_IIoTset_d128_Mamba"
 output_dir = f"RawByteTrafficModelling/PreTraining/TrainingOutputs/{RUN_NAME}"
 os.makedirs(output_dir, exist_ok=True)   # existing scripts assume this exists; it often doesn't
 
@@ -65,12 +66,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ### Set Training Parameters
-PACKET_AE_CKPT = "RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_AutoEncoder_FlowSplit/PacketLevelAutoEncoder_EdgeIIoT_E1.ckpt"
-TRAIN_LATENT_CACHE = "data_artefacts/IIoTset-Ferrag/flow_split/latents_EdgeIIoT_E1/train"
-TEST_LATENT_CACHE = "data_artefacts/IIoTset-Ferrag/flow_split/latents_EdgeIIoT_E1/test"
+# Must match CachePacketLatents' constants -- load_latent_cache compares a sha256 of
+# the checkpoint, so a stale cache fails loudly here rather than training silently.
+DATASET = DATASETS["IIoTset-Ferrag"]
+CACHE_TAG = "PacketAE_d128_best"
+PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_IIoTset_d128/"
+                  "PacketLevelAutoEncoder_PacketAE_IIoTset_d128_best.ckpt")
+TRAIN_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "train")
+TEST_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "test")
 # Byte-level eval needs the raw packets, which the latent cache does not hold. This
 # must be the parquet TEST_LATENT_CACHE was built from (asserted against its meta.json).
-VAL_SPLIT_FILE = "data_artefacts/IIoTset-Ferrag/flow_split/test.parquet"
+VAL_SPLIT_FILE = DATASET.test
 
 PACKETS_PER_SEQUENCE = 65      # P, including the slot the seq-CLS overwrites
 SEQ_ENCODER_DIM = 384

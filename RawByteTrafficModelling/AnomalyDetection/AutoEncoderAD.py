@@ -1,5 +1,6 @@
 from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  MLM_Params, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone, AutoregressiveDecoder, PacketAutoencoder, load_AE_Checkpoint
 from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder, PreTrainingDatasetHandler
+from RawByteTrafficModelling.PreTraining.RunConfig import DATASETS, make_id_encoder, resolve_device
 import polars as pl
 import torch
 from keras_hub.layers import MaskedLMMaskGenerator
@@ -10,7 +11,9 @@ import logging
 import torch.nn.functional as F
 import os
 
-output_dir = "RawByteTrafficModelling/AnomalyDetection/Outputs/test"
+DATASET = DATASETS["IIoTset-Ferrag"]
+output_dir = "RawByteTrafficModelling/AnomalyDetection/Outputs/ReconstructionLosses_PacketAE_IIoTset_d128"
+os.makedirs(output_dir, exist_ok=True)   # the FileHandler below cannot create it
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -31,20 +34,23 @@ packets_per_sequence = 64     # max packets per sequence
 num_classes = 14
 batch_size = 1024
 
-data = pl.read_parquet("/home/plb41586/workspace/data_artefacts/IIoTset-Ferrag/NormalMerged.parquet")
+# val, not NormalMerged: the packet AE trained on train.parquet, so scoring the whole
+# capture would put training packets in the "normal" reconstruction-loss distribution
+# and flatter the separation against the attack sets.
+data = pl.read_parquet(DATASET.val)
 logger.info(data.head())
 
 # CLS (Classify) token replaces Start Of Sequence  token
-ID_Encoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259, "<EndPointMasking>": 260, "<BOS>": 261}, CLS_Placement="EOS")
+ID_Encoder = make_id_encoder()
 DataHandler = PreTrainingDatasetHandler(data, 1, ID_Encoder)
 
 # Init Label ProtoHierarchy Encoder
 ProtoHierarchyEncoder = OneHotEncoder(sparse_output=False, dtype=np.float32)
 ProtoHierarchyEncodings = ProtoHierarchyEncoder.fit_transform(DataHandler.data["proto_hierarchy"].unique().to_numpy().reshape(-1, 1))
 
-device = torch.device("cuda:0")
-assert device == torch.device("cuda")
-AEpath = '/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/test/PacketLevelAutoEncoder_EdgeIIoT.ckpt'
+device = resolve_device(0)
+AEpath = ('RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_IIoTset_d128/'
+          'PacketLevelAutoEncoder_PacketAE_IIoTset_d128_best.ckpt')
 AEparams, ckpt = load_AE_Checkpoint(AEpath)
 
 AE_model = PacketAutoencoder(AEparams)
@@ -77,7 +83,7 @@ with torch.no_grad():
 losses = np.array(losses)
 np.save(f"{output_dir}/AutoEncoder_AnomalyDetection_NormalLosses.npy", losses)
 
-attack_dir = 'data_artefacts/IIoTset-Ferrag/attacks'
+attack_dir = DATASET.attacks
 attack_files = os.listdir(attack_dir)
 for file in attack_files:
     if not file.endswith('.parquet'): continue

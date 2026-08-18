@@ -31,6 +31,7 @@ from RawByteTrafficModelling.ModelComponents.DataUtils import (
     PreTrainingDatasetHandler,
     load_latent_cache,
 )
+from RawByteTrafficModelling.PreTraining.RunConfig import DATASETS
 import polars as pl
 import numpy as np
 import torch
@@ -38,23 +39,28 @@ import logging
 import os
 
 ### Set Export Parameters
-RUN_NAME = "SeqAE_EdgeIIoT_Mamba"
+# NOTE: this consumes a *sequence*-level checkpoint, which does not exist yet for the
+# d128 packet encoder -- the sequence AE has to be retrained on the caches below first.
+RUN_NAME = "SeqAE_IIoTset_d128_Mamba"
 SEQ_AE_CKPT = (f"RawByteTrafficModelling/PreTraining/TrainingOutputs/{RUN_NAME}/"
                f"SequenceLevelAutoEncoder_{RUN_NAME}_best.ckpt")
 output_dir = f"RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_{RUN_NAME}"
 
+DATASET = DATASETS["IIoTset-Ferrag"]
+CACHE_TAG = "PacketAE_d128_best"       # must match CachePacketLatents
+
 # Sets that already have a packet-latent cache from CachePacketLatents.
 CACHED_SETS = [
-    ("train", "data_artefacts/IIoTset-Ferrag/flow_split/latents_EdgeIIoT_E1/train"),
-    ("test",  "data_artefacts/IIoTset-Ferrag/flow_split/latents_EdgeIIoT_E1/test"),
+    ("train", DATASET.latent_cache(CACHE_TAG, "train")),
+    ("test",  DATASET.latent_cache(CACHE_TAG, "test")),
 ]
 # Sets that have no cache and must be encoded from bytes.
 TOKEN_SETS = [
-    ("val", "data_artefacts/IIoTset-Ferrag/flow_split/val.parquet"),
+    ("val", DATASET.val),
 ]
 # One .npy per attacks/*.parquet, stem = attack name. Attack labelling in this dataset
 # is by filename -- no parquet carries an AttackLabel column (see TODO.md).
-ATTACK_DIR = "data_artefacts/IIoTset-Ferrag/attacks"
+ATTACK_DIR = DATASET.attacks
 
 PACKETS_PER_SEQUENCE = 65      # P, including the slot the seq-CLS overwrites
 MAX_WINDOWS_PER_SET = 20_000   # evenly spaced subset; the viz subsamples again anyway
@@ -65,7 +71,7 @@ PACKET_BATCH = 512             # packets per packet-encoder forward (matches Cac
 # 0 disables. A mismatch here means the flow index no longer reproduces the cache's
 # row order, which would silently corrupt every token-path set.
 CROSS_CHECK_WINDOWS = 32
-CROSS_CHECK_SPLIT = "data_artefacts/IIoTset-Ferrag/flow_split/test.parquet"
+CROSS_CHECK_SPLIT = DATASET.test
 CROSS_CHECK_TOL = 1e-2
 
 # Wiring test: tiny caps, two attack files, and a separate output dir so a smoke run

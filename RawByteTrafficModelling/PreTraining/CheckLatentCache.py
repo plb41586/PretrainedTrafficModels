@@ -1,5 +1,5 @@
 """
-Read-only verification of the val latent cache. Writes nothing.
+Read-only verification of one split's latent cache (set SPLIT below). Writes nothing.
 
 1. Equivalence: for a few flows, re-encode their packets through the live packet
    encoder (token path) and compare against the cached rows.
@@ -12,24 +12,32 @@ from RawByteTrafficModelling.ModelComponents.ModelDefinitions import (
     PacketAutoencoder, load_AE_Checkpoint,
 )
 from RawByteTrafficModelling.ModelComponents.DataUtils import (
-    ID_Encoder, PreTrainingDatasetHandler, CachedLatentSequenceHandler, load_latent_cache,
+    PreTrainingDatasetHandler, CachedLatentSequenceHandler, load_latent_cache,
+)
+from RawByteTrafficModelling.PreTraining.RunConfig import (
+    DATASETS, make_id_encoder, resolve_device,
 )
 import polars as pl
 import numpy as np
 import torch
 
-SPLIT_FILE = "data_artefacts/IIoTset-Ferrag/split/val.parquet"
-CACHE_DIR = "data_artefacts/IIoTset-Ferrag/split/latents_EdgeIIoT_E0/val"
-PACKET_AE_CKPT = "RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_AutoEncoder/PacketLevelAutoEncoder_EdgeIIoT_E0.ckpt"
+# Must match CachePacketLatents' constants, or load_latent_cache's sha256 check fails.
+DATASET = DATASETS["IIoTset-Ferrag"]
+CACHE_TAG = "PacketAE_d128_best"
+SPLIT = "train"                # "test" is the same checks over 4.7x fewer rows
+PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_IIoTset_d128/"
+                  "PacketLevelAutoEncoder_PacketAE_IIoTset_d128_best.ckpt")
+SPLIT_FILE = getattr(DATASET, SPLIT)
+CACHE_DIR = DATASET.latent_cache(CACHE_TAG, SPLIT)
 PACKETS_PER_SEQUENCE = 65
-SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259, "<EndPointMasking>": 260, "<BOS>": 261}
+DEVICE_INDEX = 0
 
-device = torch.device("cuda")
+device = resolve_device(DEVICE_INDEX)
 latents, flow_offsets, meta = load_latent_cache(CACHE_DIR, PACKET_AE_CKPT)
 print(f"cache: {latents.shape} {latents.dtype}, {flow_offsets.height} flows")
 
 data = pl.read_parquet(SPLIT_FILE)
-enc = ID_Encoder(SpecialIDs=SpecialIDs, CLS_Placement="EOS")
+enc = make_id_encoder()        # must match the encoder CachePacketLatents used
 handler = PreTrainingDatasetHandler(data, PACKETS_PER_SEQUENCE - 1, enc)
 flow_index = handler.build_flow_index()
 

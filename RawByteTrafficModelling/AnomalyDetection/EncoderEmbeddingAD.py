@@ -1,5 +1,6 @@
 from RawByteTrafficModelling.ModelComponents.ModelDefinitions import  MLM_Params, Packet_MLM, Packet_Encoder, DynamicCLSPooling, TransformerBackbone, MambaBackbone, AutoregressiveDecoder, PacketAutoencoder, load_AE_Checkpoint, load_MLM_checkpoint
 from RawByteTrafficModelling.ModelComponents.DataUtils import ID_Encoder, PreTrainingDatasetHandler
+from RawByteTrafficModelling.PreTraining.RunConfig import DATASETS, make_id_encoder, resolve_device
 import polars as pl
 import torch
 from keras_hub.layers import MaskedLMMaskGenerator
@@ -10,7 +11,10 @@ import logging
 import torch.nn.functional as F
 import os
 
-output_dir = "RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/PacketEmbeddings_AutoEncoder/Split"
+DATASET = DATASETS["IIoTset-Ferrag"]
+output_dir = ("RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/"
+              "PacketEmbeddings_PacketAE_IIoTset_d128")
+os.makedirs(output_dir, exist_ok=True)   # the FileHandler below cannot create it
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -23,9 +27,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-device = torch.device("cuda:1")
+device = resolve_device(0)
 
-AEpath = 'RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_AutoEncoder_FlowSplit/PacketLevelAutoEncoder_EdgeIIoT_E0.ckpt'
+AEpath = ('RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_IIoTset_d128/'
+          'PacketLevelAutoEncoder_PacketAE_IIoTset_d128_best.ckpt')
 AEparams, ckpt = load_AE_Checkpoint(AEpath)
 AE_model = PacketAutoencoder(AEparams)
 AE_model.load_state_dict(ckpt['model_state_dict'])
@@ -33,7 +38,8 @@ vocab_size = AEparams.ENC_Params.vocab_size
 packet_encoder_model = AE_model.encoder
 packet_encoder_model.to(device)
 
-# MLM_Path = '/home/plb41586/workspace/RawByteTrafficModelling/PreTraining/TrainingOutputs/EdgeIIoT_64/PacketLevelMLM_EdgeIIoT_E2.pth'
+# Swap the AE encoder above for the MLM's by uncommenting this block:
+# MLM_Path = 'RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketMLM_IIoTset_d128/PacketLevelMLM_PacketMLM_IIoTset_d128_best.ckpt'
 # MLMparams, ckpt = load_MLM_checkpoint(MLM_Path)
 # MLM_model = Packet_MLM(MLMparams)
 # MLM_model.load_state_dict(ckpt['model_state_dict'])
@@ -46,12 +52,14 @@ losses = []
 batch_size = 1024
 
 # CLS (Classify) token replaces Start Of Sequence  token
-ID_Encoder = ID_Encoder(SpecialIDs = {"<pad>": 256, "</s>": 257, "<CLS>": 258, "<mask>": 259, "<EndPointMasking>": 260, "<BOS>": 261}, CLS_Placement="EOS")
+ID_Encoder = make_id_encoder()
 
 
-attack_dir = 'data_artefacts/IIoTset-Ferrag/attacks'
+attack_dir = DATASET.attacks
 attack_files = os.listdir(attack_dir)
-normal_file = "data_artefacts/IIoTset-Ferrag/flow_split/val.parquet"
+# val: the final held-out split, so the "normal" embeddings are of packets the
+# packet encoder never trained on.
+normal_file = DATASET.val
 
 files = []
 for file in attack_files:
