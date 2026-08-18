@@ -72,8 +72,14 @@ both `devcontainer`). Key environment facts baked into the container:
   `causal-conv1d`, `keras-nlp`/`keras_hub`, `torch`) that are not all captured in
   `requirements.txt`. It is first on `PATH` via `ENV`, so `python` is the venv's python without
   activating anything.
-- One GPU is reserved for the container; `redis` runs as a second service on the `devnet`
-  network, reachable at host `redis`.
+- **Two** RTX A5000s (24 GB each) are attached to the container and both are usable. Independent
+  runs take one device each and go concurrently — this beats DDP here, because the data pipeline
+  is synchronous single-threaded CPU work on the main thread and DDP would not shrink that
+  serial fraction. Select with `RunConfig.resolve_device(index)`; scripts carry a `DEVICE_INDEX`
+  constant. Anything importing `keras_hub` must pin TensorFlow to the CPU *before* that import
+  (`import tensorflow as tf; tf.config.set_visible_devices([], "GPU")`), or TF preallocates
+  nearly all memory on **both** GPUs and starves the other run.
+- `redis` runs as a second service on the `devnet` network, reachable at host `redis`.
 - Rust toolchain via rustup; `feature_extraction/target/release` is on `PATH` (via the same
   stale `/workspace` prefix — build and invoke by path if that bites).
 
@@ -92,12 +98,20 @@ Python (cwd must be the workspace folder so `RawByteTrafficModelling` resolves a
 python -m RawByteTrafficModelling.PreTraining.PacketLevelMLM
 python -m RawByteTrafficModelling.PreTraining.PacketLevelAutoEncoder
 python -m RawByteTrafficModelling.PreTraining.SequenceLevelAutoEncoder
-python -m RawByteTrafficModelling.PreTraining.CachePacketLatents
+python -m RawByteTrafficModelling.PreTraining.CachePacketLatents   # both splits in one run
+python -m RawByteTrafficModelling.PreTraining.CheckLatentCache     # read-only cache verification
 python -m RawByteTrafficModelling.AnomalyDetection.AutoEncoderAD
 ```
 These are not CLI tools — they are scripts with hardcoded config (paths, hyperparameters,
 `output_dir`, GPU device) at the top of the file. To change training config, edit the
 constants directly rather than adding argparse.
+
+What is *not* per-experiment lives in `RawByteTrafficModelling/PreTraining/RunConfig.py`:
+the dataset path registry (`DATASETS`), `SPECIAL_IDS` / `VOCAB_SIZE` / `PACKET_ID_LEN`,
+`make_id_encoder()`, `packet_encoder_params()`, `setup_run()` (mkdir + logging),
+`resolve_device()`, `MetricsCsv`, `cosine_warmup_lambda()`, `fixed_eval_batches()` and
+`plot_curves()`. New scripts should import these rather than re-deriving them; hyperparameters
+still belong as constants in the script. `PacketLevelAutoEncoder.py` is the current template.
 
 Rust (`feature_extraction/`):
 ```
@@ -119,20 +133,24 @@ TOML), so the usual invocation is just `--file <pcap> --pl-outfile <path>`. `--l
 after N packets and is the cheapest smoke test. See `feature_extraction/MIGRATION.md` for the
 full pre-merge → merged migration notes.
 
-Data splitting utilities (both take their config from constants at the bottom of the file):
+Data splitting utility (config from constants at the bottom of the file):
 ```
-python -m data_tools.SplitDataDF    # packet-level: contiguous row slices, ignores flows
 python -m data_tools.SplitFlowsDF   # flow-level: whole flows per split, long flows cut by time
 ```
-`SplitFlowsDF` is the one to use for flow/sequence-level work — it keeps every flow in a single
-split, cutting only long-lived flows chronologically (train -> test -> val), and hits the ratios
-in packets. It assumes an attack-free capture (see its module docstring). It groups on a
-canonical conversation key derived in Python, which was a workaround for the pre-merge
-extractor writing a directional `flow_key` fragmented by `proto_hierarchy`. The merged
-extractor writes a normalized key carrying only the transport token, so for parquets extracted
-with it the canonicalization is a redundant no-op that maps each `flow_key` to itself. It is
-kept because `data_artefacts/` still holds pre-merge parquets. The `flow_key` column is written
-out unchanged either way, so the latent-cache path is unaffected.
+There is only one splitter. `SplitDataDF` — packet-level contiguous row slices that ignored
+flows, and so tore a single flow across train/test/val — was deleted for leakage; do not
+reintroduce a packet-level split, and treat `flow_split/` as the only valid partition.
+
+`SplitFlowsDF` keeps every flow in a single split, cutting only long-lived flows
+chronologically (train -> test -> val), and hits the ratios in packets. It assumes an
+attack-free capture (see its module docstring). It groups on a canonical conversation key
+derived in Python, which was a workaround for the pre-merge extractor writing a directional
+`flow_key` fragmented by `proto_hierarchy`. The merged extractor writes a normalized key
+carrying only the transport token, so on current parquets the canonicalization is a redundant
+no-op mapping each `flow_key` to itself. Nothing still reads the pre-merge parquets, so it can
+be collapsed to a plain `group_by("flow_key")` whenever `data_artefacts/deprecated_*` is
+deleted (see `TODO.md`). The `flow_key` column is written out unchanged either way, so the
+latent-cache path is unaffected.
 
 **Do not mix key formats within one artefact lineage.** Re-extracting a capture changes its
 `flow_key` strings, so its split and any latent cache keyed on them
@@ -156,10 +174,13 @@ Everything lives under `RawByteTrafficModelling/ModelComponents/`:
   back to `build_backbone` when none is passed.
 - **`DataUtils.py`** — `ID_Encoder` turns raw byte arrays into fixed-length (1520) token-ID
   sequences with a CLS token placed either at SOS or EOS, plus pad/end-of-sequence tokens.
-  `TrainingDatasetHandler` / `ValidationDatasetHandler` / `PreTrainingDatasetHandler` wrap a
-  Polars DataFrame (columns include `data`, `mask`, `AttackLabel`, `FlowID`,
-  `proto_hierarchy`) and provide batch/sequence sampling (by label, by flow, or by raw epoch
-  index).
+  `PreTrainingDatasetHandler` is the one in live use: it wraps a Polars DataFrame
+  (`data`, `mask`, `proto_hierarchy`, plus `flow_key`/`timestamp_*` for `build_flow_index`) and
+  provides sampling by flow or by raw epoch index. `TrainingDatasetHandler` /
+  `ValidationDatasetHandler` sample by label and are **dead code** — they need `AttackLabel` and
+  `FlowID` columns that no current parquet has. Also here: `load_latent_cache` (verifies the
+  cache's checkpoint sha256) and `CachedLatentSequenceHandler` (windowed batches over cached
+  packet latents).
 - **`FlowID.py`** — derives a `FlowID` for each packet row by hashing sorted sender/receiver
   address bytes extracted via the packet's byte mask (works for both Ethernet-only and
   IPv4/IPv6-bearing packets); `add_Flow_ID` appends this as a Polars column.
@@ -223,20 +244,34 @@ against the packet-AE ceiling replaced it; don't reintroduce it.
 - Config dataclasses nest raw dicts for their sub-configs (e.g. `AutoEncoderParams.DecBackbone`
   is a plain dict on disk); always go through the corresponding `unpack_*_params` function
   after `torch.load`, never construct the dataclass directly from a checkpoint's `config` dict.
-- `RawByteTrafficModelling/PreTraining/SequenceLevelAutoEncoder.py` is a work-in-progress
-  sketch (references an undefined `loader`, uses stale `d_model=` kwargs where
-  `BackboneParams` now expects `dim=`) — treat it as a draft to finish, not a working
-  reference, when asked to build on sequence-level AE training.
+- `RawByteTrafficModelling/PreTraining/SequenceLevelAutoEncoder.py` is finished and has trained
+  end to end; the old "work-in-progress sketch" warning no longer applies. It is the reference
+  for how a training script here should look (warmup+cosine, resume, metrics CSV, curves) —
+  though it predates `RunConfig.py` and still carries its own copies of those helpers.
 
 ## Data conventions
 
-- Packet byte sequences are fixed at **1520 tokens** (`packet_id_len`); vocab size is
-  typically **262** = 256 byte values + special tokens (`<pad>=256`, `</s>=257`, `<CLS>=258`,
-  `<mask>=259`, `<EndPointMasking>=260`, `<BOS>=261` — defined ad hoc per-script, not centrally).
-- Datasets are Polars DataFrames (parquet under `data_artefacts/`, gitignored) with at least
-  `data` (raw bytes), `mask` (which bytes to redact for MLM/PII), `AttackLabel`, `FlowID`, and
-  `proto_hierarchy` columns.
+- Packet byte sequences are fixed at **1520 tokens** (`packet_id_len`); vocab size is **262** =
+  256 byte values + special tokens (`<pad>=256`, `</s>=257`, `<CLS>=258`, `<mask>=259`,
+  `<EndPointMasking>=260`, `<BOS>=261`). These now live centrally in
+  `RawByteTrafficModelling/PreTraining/RunConfig.py` (`SPECIAL_IDS`, `VOCAB_SIZE`,
+  `PACKET_ID_LEN`); the older scripts still carry ad-hoc copies, so prefer the module.
+- The `ID_Encoder` CLS placement is `"EOS"` and is load-bearing across levels — a latent cache
+  built one way cannot be read by a model expecting the other. Go through
+  `RunConfig.make_id_encoder()` rather than constructing one inline.
+- **Where the data lives:** `data_artefacts/merged_extractor/<capture>/` with
+  `NormalMerged.parquet`, `attacks/*.parquet` and `flow_split/{train,test,val}.parquet` plus
+  `split_report.json`. Latent caches sit under `flow_split/latents_<tag>/<split>/`. Reach all of
+  it through `RunConfig.DATASETS["IIoTset-Ferrag"]` rather than hardcoding paths.
+  `data_artefacts/deprecated_*` is the pre-merge tree — nothing reads it any more.
+- Datasets are Polars DataFrames (parquet under `data_artefacts/`, gitignored) with the columns
+  `proto_hierarchy`, `flow_key`, `timestamp_s`, `timestamp_us`, `data` (raw bytes), `mask`
+  (which bytes to redact for MLM/PII) and `header_len`. There is **no** `AttackLabel` or
+  `FlowID` column: attack labelling is by file name (`attacks/<Class>.parquet`) and the flow
+  identifier is the `flow_key` string. `TrainingDatasetHandler` / `ValidationDatasetHandler` in
+  `DataUtils.py` require those two missing columns and are therefore dead against current
+  artefacts — use `PreTrainingDatasetHandler`.
 - `data_artefacts/`, model checkpoints (`*.pth`, `*.ckpt`), and logs are gitignored — training
   scripts write into per-run subdirectories under `RawByteTrafficModelling/PreTraining/TrainingOutputs/`
-  or `.../AnomalyDetection/Outputs/` that must exist before the script's `logging.FileHandler`
-  is created (scripts do not `mkdir` their output dir).
+  or `.../AnomalyDetection/Outputs/`. Scripts on `RunConfig.setup_run()` create their own
+  output dir; the older ones do not, and their `logging.FileHandler` raises if it is missing.
