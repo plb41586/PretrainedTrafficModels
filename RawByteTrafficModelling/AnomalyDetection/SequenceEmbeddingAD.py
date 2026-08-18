@@ -31,7 +31,7 @@ from RawByteTrafficModelling.ModelComponents.DataUtils import (
     PreTrainingDatasetHandler,
     load_latent_cache,
 )
-from RawByteTrafficModelling.PreTraining.RunConfig import DATASETS
+from RawByteTrafficModelling.PreTraining.RunConfig import DATASETS, resolve_device
 import polars as pl
 import numpy as np
 import torch
@@ -39,9 +39,9 @@ import logging
 import os
 
 ### Set Export Parameters
-# NOTE: this consumes a *sequence*-level checkpoint, which does not exist yet for the
-# d128 packet encoder -- the sequence AE has to be retrained on the caches below first.
-RUN_NAME = "SeqAE_IIoTset_d128_Mamba"
+# The sequence-AE run to export. s512 was chosen from the width sweep: it reaches 96.7%
+# of the packet-decoder byte-accuracy ceiling at 45% of s768's parameters.
+RUN_NAME = "SeqAE_IIoTset_d128_Mamba_s512"
 SEQ_AE_CKPT = (f"RawByteTrafficModelling/PreTraining/TrainingOutputs/{RUN_NAME}/"
                f"SequenceLevelAutoEncoder_{RUN_NAME}_best.ckpt")
 output_dir = f"RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_{RUN_NAME}"
@@ -94,8 +94,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-device = torch.device("cuda")
-assert device == torch.device("cuda")
+device = resolve_device(0)
 
 ### Load the trained sequence autoencoder
 # The packet encoder's weights ride inside this state dict (encoder.packet_encoder.*),

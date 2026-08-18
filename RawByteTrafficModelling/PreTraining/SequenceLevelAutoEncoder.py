@@ -53,7 +53,7 @@ import os
 # Width of the sequence encoder/decoder, i.e. the size of the flow bottleneck vector.
 # The one knob the capacity sweep varies; the run name carries it so the sweep's runs
 # land in separate directories.
-SEQ_DIM = 384
+SEQ_DIM = 512
 RUN_NAME = f"SeqAE_IIoTset_d128_Mamba_s{SEQ_DIM}"
 DEVICE_INDEX = 0
 
