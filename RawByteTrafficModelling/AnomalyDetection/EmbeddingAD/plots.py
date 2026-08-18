@@ -232,7 +232,7 @@ def plot_calibration(metrics, quantiles, out_path):
     for det in metrics["detector"].unique(maintain_order=True):
         realised = [metrics.filter((pl.col("detector") == det)
                                    & (pl.col("bin") == ev.ALL_BIN)
-                                   & (pl.col("metric") == f"fpr_val@q{q}"))["value"][0]
+                                   & (pl.col("metric") == f"fpr_evalneg@q{q}"))["value"][0]
                     for q in quantiles]
         ax.plot(nominal, realised, marker="o", lw=1.2, label=det)
     lims = [min(nominal) / 2, max(nominal) * 2]

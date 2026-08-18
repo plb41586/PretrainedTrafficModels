@@ -92,7 +92,7 @@ def evaluate(scores: dict[str, np.ndarray], meta: pl.DataFrame,
                 emit(det, CALIBRATION, bin_name, f"threshold@q{q}", thr)
                 realised = ((neg_scores > thr).mean()
                             if neg_scores.shape[0] and np.isfinite(thr) else float("nan"))
-                emit(det, CALIBRATION, bin_name, f"fpr_val@q{q}", realised)
+                emit(det, CALIBRATION, bin_name, f"fpr_evalneg@q{q}", realised)
             emit(det, CALIBRATION, bin_name, "n_calib", calib_scores.shape[0])
             emit(det, CALIBRATION, bin_name, "n_neg", neg_scores.shape[0])
 

@@ -27,11 +27,19 @@ def load_embedding_dir(data_dir: str) -> tuple[np.ndarray, pl.DataFrame]:
     Labels come from `metadata.parquet`, never re-derived from the filenames -- but the
     file order is used to *verify* the metadata, since a mismatch would silently attribute
     attack rows to normal splits and quietly invert every result.
+
+    Only files whose stem is a label in metadata.parquet are read. Downstream tools write
+    their own .npy artefacts into this directory (embedding_viz caches umap_coords.npy),
+    and those must not be stacked in as if they were an exported set.
     """
     data_dir = Path(data_dir)
-    files = sorted(data_dir.glob("*.npy"))
+    known = set(pl.read_parquet(data_dir / "metadata.parquet")["label"].unique().to_list())
+    files = [f for f in sorted(data_dir.glob("*.npy")) if f.stem in known]
     if not files:
-        raise FileNotFoundError(f"no .npy files in {data_dir}")
+        raise FileNotFoundError(f"no .npy files in {data_dir} matching a metadata label")
+    skipped = sorted(f.stem for f in data_dir.glob("*.npy") if f.stem not in known)
+    if skipped:
+        logger.info(f"Ignoring non-embedding .npy in {data_dir}: {skipped}")
 
     parts, expected = [], []
     for f in files:
@@ -86,8 +94,16 @@ def take_rows(df: pl.DataFrame, idx: np.ndarray) -> pl.DataFrame:
 
 
 def split_roles(meta: pl.DataFrame, fit_label: str, calib_label: str,
-                eval_neg_label: str, attack_set: str = "attack") -> dict[str, np.ndarray]:
-    """Boolean row masks for the four roles, checked to be non-empty and disjoint."""
+                eval_neg_label: str, attack_set: str = "attack",
+                calib_frac: float = 0.5, seed: int = 0) -> dict[str, np.ndarray]:
+    """Boolean row masks for the four roles, checked to be non-empty and disjoint.
+
+    If calib_label == eval_neg_label, that one set plays both roles and is split
+    deterministically into two disjoint halves (calib_frac to calibration). That is
+    what keeps thresholds from being calibrated on the very rows they are then
+    evaluated against, and it is how the final held-out split stays unspent while
+    still getting an honest false-positive rate.
+    """
     label = meta["label"].to_numpy()
     set_col = meta["set"].to_numpy()
     masks = {
@@ -96,6 +112,18 @@ def split_roles(meta: pl.DataFrame, fit_label: str, calib_label: str,
         "eval_neg": label == eval_neg_label,
         "eval_pos": set_col == attack_set,
     }
+
+    if calib_label == eval_neg_label:
+        idx = np.where(label == calib_label)[0]
+        shuffled = np.random.default_rng(seed).permutation(idx)
+        n_calib = int(round(calib_frac * idx.size))
+        calib_mask = np.zeros_like(masks["calib"])
+        eval_mask = np.zeros_like(masks["eval_neg"])
+        calib_mask[shuffled[:n_calib]] = True
+        eval_mask[shuffled[n_calib:]] = True
+        masks["calib"], masks["eval_neg"] = calib_mask, eval_mask
+        logger.info(f"'{calib_label}' plays both calib and eval_neg: split "
+                    f"{n_calib}/{idx.size - n_calib} (disjoint, seed {seed})")
     for name, m in masks.items():
         if not m.any():
             raise ValueError(f"role '{name}' selects no rows -- check the *_LABEL config "

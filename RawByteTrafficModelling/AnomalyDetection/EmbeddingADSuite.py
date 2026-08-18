@@ -4,23 +4,30 @@ Embedding_Viz.ipynb shows promising separation between normal and attack flows, 
 cannot be used as evidence: both the StandardScaler and the UMAP reducer there are fitted
 on the pooled normals *and* attacks, so the projection was told where the attacks are.
 This script fits every transform and every detector on the `train` normals alone,
-calibrates thresholds from `test` normal scores without looking at a label, and only then
-reveals labels to compute the reported metrics against `val` normals + the attack exports.
+calibrates thresholds from held-out normal scores without looking at a label, and only
+then reveals labels to compute the reported metrics against the evaluation normals
+(EVAL_NEG_LABEL) + the attack exports.
 
 Split roles follow the project's naming -- `train` is fitted on, `test` was monitored
-during training and is therefore already spent, `val` is the final held-out set:
+during training, `val` is the final held-out set:
 
-    fit       train.npy    preprocessing + every detector
-    calibrate test.npy     score quantiles -> thresholds (no labels)
-    evaluate  val.npy      -> y=0
-              attacks      -> y=1
+    fit       train.npy         preprocessing + every detector
+    calibrate test.npy (half)   score quantiles -> thresholds (no labels)
+    evaluate  test.npy (other)  -> y=0
+              attacks           -> y=1
+
+`val` is untouched by design: it is spent once, in a single final evaluation. Until then
+`test` plays both calibration and evaluation, split into two disjoint halves so thresholds
+are never calibrated on the rows they are scored against. Because `test` selected the best
+checkpoint during training, these numbers are mildly optimistic; the final val run is what
+settles them.
 
 Two things to read the output with. First, `seq_len_only` is in the detector list on
-purpose: the attack exports are almost entirely single-packet windows while the normal
-splits average ~35 packets, so a pooled AUROC largely measures flow length. A learned
-detector has shown something about the embedding only where it beats that row. Second,
-every table is repeated per seq_len bin with length-matched normals, which is where that
-confound is controlled rather than merely flagged.
+purpose: most attack exports are dominated by single-packet windows (DDoS_UDP_Flood is
+100% single-packet) while the normal splits have a median of 64, so a pooled AUROC largely
+measures flow length. A learned detector has shown something about the embedding only
+where it beats that row. Second, every table is repeated per seq_len bin with
+length-matched normals, which is where that confound is controlled rather than flagged.
 
 Run from the repo root:
     python -m RawByteTrafficModelling.AnomalyDetection.EmbeddingADSuite
@@ -47,15 +54,22 @@ from RawByteTrafficModelling.AnomalyDetection.EmbeddingAD.detectors import (
 )
 
 ### Config
-RUN_NAME = "SeqAE_EdgeIIoT_Mamba"
+RUN_NAME = "SeqAE_IIoTset_d128_Mamba_s512"
 EMBEDDING_DIR = f"RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_{RUN_NAME}"
 output_dir = f"RawByteTrafficModelling/AnomalyDetection/Outputs/AD/{RUN_NAME}"
 
 # Which exported set plays which role. Project naming: test is the split monitored during
-# training (already spent, so it is where thresholds get burned), val is held out.
+# training, val is the final held-out set.
+#
+# val is deliberately NOT used here. It is spent once, in a single final evaluation, so
+# this run evaluates against `test` instead: split_roles splits it into two disjoint
+# halves, calibrating thresholds on one and evaluating on the other, so the false-positive
+# rates are still honest. The cost is that `test` was monitored during training (it chose
+# the best checkpoint), making these numbers mildly optimistic relative to what val will
+# give. Flip EVAL_NEG_LABEL to "val" for the final run -- once.
 FIT_LABEL = "train"
 CALIB_LABEL = "test"
-EVAL_NEG_LABEL = "val"
+EVAL_NEG_LABEL = "test"
 ATTACK_SET = "attack"          # the `set` column value SequenceEmbeddingAD writes for attacks
 
 PREPROCESS = "l2_standardize"  # l2_standardize | standardize | raw -- fitted on FIT_LABEL only
@@ -69,7 +83,7 @@ MIN_BIN_N = 30                 # fewer rows than this on either side -> NaN, not
 ENABLE_SLOW = False            # include SLOW_DETECTORS (ocsvm); adds several minutes
 PROJECTION_N = 50_000          # rows kept for the UMAP/PCA projection (transform is slow)
 SEED = 0
-REFIT = True                   # False: reuse scores.parquet and only redo metrics + figures
+REFIT = True                # False: reuse scores.parquet and only redo metrics + figures
 
 # Wiring test: caps every set, drops the expensive detectors and the projection, and writes
 # to a separate directory so a smoke run never overwrites real results.
@@ -150,7 +164,7 @@ if N_MAX_PER_SET:
     X, meta = X[idx], take_rows(meta, idx)
     logger.info(f"Subsampled to {X.shape[0]} rows ({N_MAX_PER_SET} per set)")
 
-masks = split_roles(meta, FIT_LABEL, CALIB_LABEL, EVAL_NEG_LABEL, ATTACK_SET)
+masks = split_roles(meta, FIT_LABEL, CALIB_LABEL, EVAL_NEG_LABEL, ATTACK_SET, seed=SEED)
 scores_path = f"{output_dir}/scores.parquet"
 
 # --- Fit + score ------------------------------------------------------------
@@ -173,7 +187,8 @@ else:
     logger.info(f"Reusing cached scores for {list(scores)} from {scores_path}")
 
 # --- Metrics ----------------------------------------------------------------
-logger.info("Scoring against val normals (labels enter here for the first time)")
+logger.info(f"Scoring against '{EVAL_NEG_LABEL}' normals "
+            f"(labels enter here for the first time)")
 metrics = ev.evaluate(scores, meta, masks, QUANTILES, SEQ_LEN_BINS, MIN_BIN_N)
 metrics.write_parquet(f"{output_dir}/metrics.parquet")
 
@@ -187,8 +202,8 @@ summary = (metrics
            .pivot(on="metric", index="detector", values="value")
            .join(metrics
                  .filter((pl.col("attack") == ev.CALIBRATION) & (pl.col("bin") == ev.ALL_BIN)
-                         & (pl.col("metric") == "fpr_val@q0.99"))
-                 .select(["detector", pl.col("value").alias("fpr_val@q0.99")]),
+                         & (pl.col("metric") == "fpr_evalneg@q0.99"))
+                 .select(["detector", pl.col("value").alias("fpr_evalneg@q0.99")]),
                  on="detector", how="left"))
 logger.info("Pooled summary (all seq_len -- inflated by the length confound):\n"
             + str(summary))
