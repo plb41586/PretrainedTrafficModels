@@ -38,7 +38,7 @@ from RawByteTrafficModelling.ModelComponents.DataUtils import (
     load_latent_cache,
 )
 from RawByteTrafficModelling.ModelComponents.BackBones import MambaBackboneParams
-from RawByteTrafficModelling.PreTraining.RunConfig import DATASETS
+from RawByteTrafficModelling.PreTraining.RunConfig import DATASETS, resolve_device
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -50,20 +50,12 @@ import math
 import csv
 import os
 
-RUN_NAME = "SeqAE_IIoTset_d128_Mamba"
-output_dir = f"RawByteTrafficModelling/PreTraining/TrainingOutputs/{RUN_NAME}"
-os.makedirs(output_dir, exist_ok=True)   # existing scripts assume this exists; it often doesn't
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(f'{output_dir}/SequenceLevelAutoEncoder.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# Width of the sequence encoder/decoder, i.e. the size of the flow bottleneck vector.
+# The one knob the capacity sweep varies; the run name carries it so the sweep's runs
+# land in separate directories.
+SEQ_DIM = 384
+RUN_NAME = f"SeqAE_IIoTset_d128_Mamba_s{SEQ_DIM}"
+DEVICE_INDEX = 0
 
 ### Set Training Parameters
 # Must match CachePacketLatents' constants -- load_latent_cache compares a sha256 of
@@ -79,11 +71,13 @@ TEST_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "test")
 VAL_SPLIT_FILE = DATASET.test
 
 PACKETS_PER_SEQUENCE = 65      # P, including the slot the seq-CLS overwrites
-SEQ_ENCODER_DIM = 384
-SEQ_DECODER_DIM = 384
+SEQ_ENCODER_DIM = SEQ_DIM
+SEQ_DECODER_DIM = SEQ_DIM
 SEQ_BACKBONE = "Mamba"         # "Mamba" | "Transformer" (swap MambaBackboneParams too)
 
-Epochs = 20
+# An epoch is ~27 s off the latent cache (346 steps + eval), so epochs are cheap here
+# in a way they are not at the packet level.
+Epochs = 40
 batch_size = 256
 val_batch_size = 256
 learning_rate = 3e-4
@@ -100,11 +94,37 @@ MAX_STEPS_PER_EPOCH = None     # set to a small int for a wiring smoke test
 RESUME_FROM = None
 SEED = 42
 
+# Wiring test: same code path (both caches, byte-eval alignment probe, epoch-end
+# eval, checkpoints, curves) in a couple of minutes, into its own output_dir so a
+# smoke checkpoint can never be mistaken for a trained one. Set False for the real run.
+SMOKE = False
+if SMOKE:
+    RUN_NAME = f"{RUN_NAME}_smoke"
+    Epochs = 2
+    MAX_STEPS_PER_EPOCH = 20
+    log_every_n_batches = 10
+    WARMUP_STEPS = 5
+    BYTE_EVAL_WINDOWS = 64
+
+output_dir = f"RawByteTrafficModelling/PreTraining/TrainingOutputs/{RUN_NAME}"
+os.makedirs(output_dir, exist_ok=True)   # the FileHandler below cannot create it
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(f'{output_dir}/SequenceLevelAutoEncoder.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info(f"Run {RUN_NAME} (SMOKE={SMOKE}) -> {output_dir}")
+
 torch.manual_seed(SEED)
 rng = np.random.default_rng(SEED)
 
-device = torch.device("cuda")
-assert device == torch.device("cuda")
+device = resolve_device(DEVICE_INDEX)
 
 ### Load the cached packet latents
 # Both caches must come from the exact weights in PACKET_AE_CKPT -- load_latent_cache
