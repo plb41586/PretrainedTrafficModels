@@ -11,16 +11,16 @@ then reveals labels to compute the reported metrics against the evaluation norma
 Split roles follow the project's naming -- `train` is fitted on, `test` was monitored
 during training, `val` is the final held-out set:
 
-    fit       train.npy         preprocessing + every detector
-    calibrate test.npy (half)   score quantiles -> thresholds (no labels)
-    evaluate  test.npy (other)  -> y=0
-              attacks           -> y=1
+    fit       train.npy   preprocessing + every detector
+    calibrate test.npy    score quantiles -> thresholds (no labels)
+    evaluate  val.npy     -> y=0
+              attacks     -> y=1
 
-`val` is untouched by design: it is spent once, in a single final evaluation. Until then
-`test` plays both calibration and evaluation, split into two disjoint halves so thresholds
-are never calibrated on the rows they are scored against. Because `test` selected the best
-checkpoint during training, these numbers are mildly optimistic; the final val run is what
-settles them.
+This is the final run: `val` is spent here. It neither trained the sequence AE nor picked
+its checkpoint, so the thresholds calibrated on `test` are transferred to it rather than
+fitted on it. The splits are separated by *time*, not by flow identity -- SplitFlowsDF
+cuts long-lived conversations at a timestamp, so the same flow_key can appear either side
+of a boundary and `val` is a held-out period rather than a held-out population.
 
 Any set that plays no role is dropped immediately after the roles are assigned -- not
 merely excluded from the metrics. Keeping it would put it in the projection figure as its
@@ -61,21 +61,29 @@ from RawByteTrafficModelling.AnomalyDetection.EmbeddingAD.detectors import (
 ### Config
 RUN_NAME = "SeqAE_IIoTset_d128_Mamba_s512"
 EMBEDDING_DIR = f"RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_{RUN_NAME}"
-output_dir = f"RawByteTrafficModelling/AnomalyDetection/Outputs/AD/{RUN_NAME}"
 
 # Which exported set plays which role. Project naming: test is the split monitored during
 # training, val is the final held-out set.
 #
-# val is deliberately NOT used here. It is spent once, in a single final evaluation, so
-# this run evaluates against `test` instead: split_roles splits it into two disjoint
-# halves, calibrating thresholds on one and evaluating on the other, so the false-positive
-# rates are still honest. The cost is that `test` was monitored during training (it chose
-# the best checkpoint), making these numbers mildly optimistic relative to what val will
-# give. Flip EVAL_NEG_LABEL to "val" for the final run -- once.
+# The final run: thresholds are calibrated on the already-spent `test` and transferred to
+# `val`, which is spent here. Since the two are different splits, split_roles' halving
+# path no longer fires. Every rerun spends `val` again, so rerun only for a wiring
+# failure, never to improve a number.
 FIT_LABEL = "train"
 CALIB_LABEL = "test"
-EVAL_NEG_LABEL = "test"
+EVAL_NEG_LABEL = "val"
 ATTACK_SET = "attack"          # the `set` column value SequenceEmbeddingAD writes for attacks
+
+# The evaluation split names the output directory, so the val run lands beside the earlier
+# test-evaluated one instead of overwriting it -- the two are directly comparable and the
+# gap between them is the cost of `test` having been monitored during training.
+output_dir = (f"RawByteTrafficModelling/AnomalyDetection/Outputs/AD/"
+              f"{RUN_NAME}_eval-{EVAL_NEG_LABEL}")
+
+# The detector this run is about, pinned rather than ranked. Picking the winner from the
+# metrics below would select a detector on the same labelled rows it is then reported
+# from -- fine while eval was `test`, a selection bias on the held-out split now.
+FOCUS_DETECTOR = "mahalanobis"
 
 PREPROCESS = "l2_standardize"  # l2_standardize | standardize | raw -- fitted on FIT_LABEL only
 PCA_COMPONENTS = None          # e.g. 64 or 0.95; speeds up the distance-based detectors
@@ -144,33 +152,6 @@ def fit_and_score(Z: np.ndarray, meta: pl.DataFrame,
     return scores
 
 
-def pick_best_detector(metrics: pl.DataFrame) -> str:
-    """The learned detector that holds up best once flow length is matched.
-
-    Ranked on mean pooled AUROC across the multi-packet bins rather than the pooled `all`
-    number, because `all` is the one the length confound inflates.
-
-    NaN bins are dropped before averaging. A bin is NaN when too few normals exist at that
-    length to compare against (MIN_BIN_N), which is the common case here -- normal flows
-    are almost all ~64 packets, so only the 33-64 bin has data. Averaging without this
-    filter makes every detector's mean NaN and the ranking arbitrary: the "best" detector
-    then changes with the row order rather than with the scores.
-    """
-    multi_packet = [name for _, _, name in SEQ_LEN_BINS if name != "1"]
-    ranked = (metrics
-              .filter((pl.col("metric") == "auroc") & (pl.col("attack") == ev.POOLED)
-                      & (pl.col("bin").is_in(multi_packet))
-                      & (pl.col("detector") != "seq_len_only")
-                      & pl.col("value").is_not_nan() & pl.col("value").is_not_null())
-              .group_by("detector").agg(pl.col("value").mean().alias("mean_auroc"))
-              .sort("mean_auroc", descending=True, nulls_last=True))
-    if ranked.height and ranked["mean_auroc"][0] is not None:
-        return ranked["detector"][0]
-    logger.warning("No length-matched bin has enough data to rank detectors; "
-                   "falling back to the last registry entry")
-    return metrics["detector"].unique(maintain_order=True)[-1]
-
-
 # --- Load -------------------------------------------------------------------
 X, meta = load_embedding_dir(EMBEDDING_DIR)
 if N_MAX_PER_SET:
@@ -224,8 +205,7 @@ metrics = ev.evaluate(scores, meta, masks, QUANTILES, SEQ_LEN_BINS, MIN_BIN_N)
 metrics.write_parquet(f"{output_dir}/metrics.parquet")
 
 agree = ev.agreement_matrix(scores, masks["eval_neg"] | masks["eval_pos"])
-best = pick_best_detector(metrics)
-logger.info(f"Best length-matched detector: {best}")
+logger.info(f"Focus detector (pinned, not picked from these metrics): {FOCUS_DETECTOR}")
 
 summary = (metrics
            .filter((pl.col("attack") == ev.POOLED) & (pl.col("bin") == ev.ALL_BIN)
@@ -247,7 +227,7 @@ figs = [
     ("Per-attack performance", "png",
      plots.plot_attack_heatmaps(metrics, HEADLINE_TPR, f"{output_dir}/attack_heatmaps.png")),
     ("Length-stratified performance", "png",
-     plots.plot_stratified(metrics, best, f"{output_dir}/stratified_heatmaps.png")),
+     plots.plot_stratified(metrics, FOCUS_DETECTOR, f"{output_dir}/stratified_heatmaps.png")),
     ("ROC / PR", "png", plots.plot_roc_pr(scores, masks, f"{output_dir}/roc_pr.png")),
     ("Score distributions", "png",
      plots.plot_score_distributions(scores, masks, metrics, QUANTILES,
@@ -263,7 +243,7 @@ figs = [
 
 if not SMOKE:
     png, go_fig = plots.plot_projection(
-        X, meta, masks, scores[best], best,
+        X, meta, masks, scores[FOCUS_DETECTOR], FOCUS_DETECTOR,
         out_html=f"{output_dir}/projection.html", out_png=f"{output_dir}/projection.png",
         n_projection=PROJECTION_N, seed=SEED)
     figs += [("Normals-only projection", "png", png),
