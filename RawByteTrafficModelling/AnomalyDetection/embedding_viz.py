@@ -39,8 +39,7 @@ import polars as pl
 import numpy as np
 import umap
 
-DATA_DIR = Path("RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/"
-                "SequenceEmbeddings_SeqAE_IIoTset_d128_Mamba_s512")
+DATA_DIR = Path("RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_SeqAEStruct_IIoTset_d128_Mamba_s512_pair_l010")
 SEED = 42
 
 # --- What is compared to what ------------------------------------------------
@@ -61,7 +60,7 @@ ATTACK_CAP = 3000
 # are then judged against, so a large attack set could carve out its own region and
 # look separated by construction. Fit-on-normal makes "far from the cloud" mean
 # "off the normal manifold", which is the actual anomaly-detection question.
-UMAP_KWARGS = dict(n_neighbors=50, min_dist=0.1, metric="cosine", random_state=SEED)
+UMAP_KWARGS = dict(n_neighbors=50, min_dist=0.1, metric="euclidean", random_state=SEED)
 
 # Palette: slots 1 and 2 of the reference categorical set, in fixed order (the two
 # most-separated hues), plus its single-hue blue sequential ramp. No invented colours.

@@ -856,6 +856,171 @@ def load_latent_cache(cache_dir: str, packet_ae_ckpt: str = None) -> tuple[torch
     return latents, flow_offsets, meta
 
 
+# ---------------------------------------------------------------------------
+# Flow context: group labels parsed out of the extractor's flow_key
+# ---------------------------------------------------------------------------
+# The merged extractor writes
+#     "{src_ip}:{src_port} -> {dst_ip}:{dst_port} ({TCP|UDP|ARP|ICMPv4|ICMPv6})"
+# and a latent cache's flow_offsets.parquet carries one such key per flow. So every
+# context axis the structure fine-tune needs -- endpoints, ports, transport -- is
+# recoverable by parsing that string, with no extra artefact on disk and nothing to
+# keep in sync with the cache.
+#
+# The endpoints are the interesting axis: PreTrainingDatasetHandler.apply_mask
+# replaces every address byte with <EndPointMasking>, so the packet encoder has never
+# seen an IP or a MAC. Grouping by endpoint therefore supervises something the model
+# provably cannot read off the bytes. The transport token is the opposite -- it sits
+# in plain sight in the byte stream -- so it shapes geometry rather than adding
+# information.
+
+COARSE_GROUP_KEYS = ("endpoint_pair", "host_lo", "host_hi")
+FINE_GROUP_KEYS = ("transport",)
+_FLOW_KEY_PATTERN = None
+
+
+def _flow_key_pattern():
+    """
+    Compile data_tools.SplitFlowsDF.FLOW_KEY_RE once, on first use.
+
+    Reused rather than restated: its greedy `.*` is what lets IPv6 keys such as
+    `fe80::b067:5f59:5094:9ba5:0 -> ff02::fb:0 (ICMPv6)` parse, and a second copy of
+    that subtlety would eventually drift.
+
+    Imported lazily rather than at module scope because DataUtils is imported by every
+    packet-level script and none of those need data_tools resolvable; compiled once
+    because the callers parse tens of thousands of keys in a loop.
+    """
+    global _FLOW_KEY_PATTERN
+    if _FLOW_KEY_PATTERN is None:
+        import re
+        from data_tools.SplitFlowsDF import FLOW_KEY_RE
+        _FLOW_KEY_PATTERN = re.compile(FLOW_KEY_RE)
+    return _FLOW_KEY_PATTERN
+
+
+def parse_flow_key(key: str) -> tuple[str, int, str, int, str]:
+    """Split one flow_key into (ip_a, port_a, ip_b, port_b, transport)."""
+    match = _flow_key_pattern().match(key)
+    if match is None:
+        raise ValueError(f"flow_key {key!r} does not match {_flow_key_pattern().pattern!r}")
+    ip_a, port_a, ip_b, port_b, transport = match.groups()
+    return ip_a, int(port_a), ip_b, int(port_b), transport
+
+
+def flow_group_labels(flow_keys: list[str], coarse: str = "endpoint_pair",
+                      fine: str = None) -> tuple[list[str], list[str]]:
+    """
+    Group *labels* (strings) for a list of flow keys.
+
+    Args:
+        flow_keys: one key per flow, e.g. CachedLatentSequenceHandler.flow_keys.
+        coarse:    "endpoint_pair" (the unordered IP pair), or "host_lo"/"host_hi"
+                   (one designated side of it).
+        fine:      None for a single level, or "transport" for a second level keyed
+                   on (coarse, TCP|UDP|ARP|ICMPv4|ICMPv6).
+
+    Returns:
+        (coarse_labels, fine_labels); fine_labels is None when fine is None.
+
+    The endpoint ordering is a plain lexicographic sort of the two address strings.
+    It deliberately does not reproduce the Rust side's numeric IpAddr ordering --
+    all that is required is that it be deterministic and direction-symmetric, which
+    conversation_key_map in data_tools/SplitFlowsDF.py notes for the same reason.
+
+    Fine labels are built *from* the coarse label, so fine groups strictly partition
+    coarse ones -- the nesting a two-level contrastive objective needs. Whether a
+    fine level partitions anything in a given capture is a property of the data, not
+    of this function: on IIoTset-Ferrag it does not (96% of train flows and 99.7% of
+    test flows are MQTT over TCP), which is what InspectFlowGroups.py measures.
+    """
+    if coarse not in COARSE_GROUP_KEYS:
+        raise ValueError(f"coarse must be one of {COARSE_GROUP_KEYS}, got {coarse!r}")
+    if fine is not None and fine not in FINE_GROUP_KEYS:
+        raise ValueError(f"fine must be None or one of {FINE_GROUP_KEYS}, got {fine!r}")
+
+    coarse_labels = []
+    fine_labels = None if fine is None else []
+    for key in flow_keys:
+        ip_a, _port_a, ip_b, _port_b, transport = parse_flow_key(key)
+        lo, hi = sorted((ip_a, ip_b))
+        if coarse == "endpoint_pair":
+            label = f"{lo}|{hi}"
+        elif coarse == "host_lo":
+            label = lo
+        else:
+            label = hi
+        coarse_labels.append(label)
+        if fine is not None:
+            fine_labels.append(f"{label}|{transport}")
+    return coarse_labels, fine_labels
+
+
+def encode_group_labels(labels: list[str],
+                        vocab: dict = None) -> tuple[np.ndarray, dict]:
+    """
+    Map group labels to contiguous int64 ids.
+
+    Args:
+        labels: one label per flow.
+        vocab:  an existing label -> id map to extend (pass the train split's vocab
+                when encoding test, so the two id spaces agree and "group unseen in
+                training" is answerable).
+
+    Returns:
+        (ids, vocab) -- ids is (F,) int64.
+    """
+    vocab = {} if vocab is None else dict(vocab)
+    ids = np.empty(len(labels), dtype=np.int64)
+    for i, label in enumerate(labels):
+        if label not in vocab:
+            vocab[label] = len(vocab)
+        ids[i] = vocab[label]
+    return ids, vocab
+
+
+def flow_group_ids(flow_keys: list[str], coarse: str = "endpoint_pair",
+                   fine: str = None,
+                   coarse_vocab: dict = None,
+                   fine_vocab: dict = None) -> tuple[np.ndarray, np.ndarray, dict, dict]:
+    """
+    Convenience wrapper: flow keys -> (coarse_ids, fine_ids, coarse_vocab, fine_vocab).
+
+    `fine_ids` and `fine_vocab` are None when no fine level is asked for. See
+    flow_group_labels for the keying options and encode_group_labels for how an
+    existing vocab is extended.
+    """
+    coarse_labels, fine_labels = flow_group_labels(flow_keys, coarse=coarse, fine=fine)
+    coarse_ids, coarse_vocab = encode_group_labels(coarse_labels, coarse_vocab)
+    if fine_labels is None:
+        return coarse_ids, None, coarse_vocab, None
+    fine_ids, fine_vocab = encode_group_labels(fine_labels, fine_vocab)
+    return coarse_ids, fine_ids, coarse_vocab, fine_vocab
+
+
+def group_support(train_ids: np.ndarray, eval_ids: np.ndarray,
+                  min_flows: int = 8) -> np.ndarray:
+    """
+    Which eval flows belong to a group the training split actually populated.
+
+    "Seen in training" is not the same as "trained on". On IIoTset-Ferrag the endpoint
+    pair carrying 65% of test windows is present in train too -- as four flows, three
+    of them ModbusTCP against 13,351 MQTT flows in test, because SplitFlowsDF assigns
+    whole conversations chronologically and that pair's MQTT workload starts late in
+    the capture. A contrastive term saw essentially nothing of that group, so pooled
+    structure metrics on the eval split would be dominated by flows it never shaped.
+
+    Args:
+        train_ids: (F_train,) group ids, encoded against the same vocabulary.
+        eval_ids:  (F_eval,) group ids.
+        min_flows: how many training flows a group needs to count as supported.
+
+    Returns:
+        (F_eval,) bool mask, True where the flow's group has >= min_flows in train.
+    """
+    counts = np.bincount(train_ids, minlength=int(max(train_ids.max(), eval_ids.max())) + 1)
+    return counts[eval_ids] >= min_flows
+
+
 class CachedLatentSequenceHandler():
     """
     Sequence-level batching straight out of a cached packet-latent array.
@@ -899,6 +1064,56 @@ class CachedLatentSequenceHandler():
         flows = rng.permutation(len(self.starts))
         return [flows[i:i + batch_size] for i in range(0, len(flows), batch_size)]
 
+    def epoch_grouped_flow_batches(self, group_ids: np.ndarray, batch_size: int,
+                                   rng: np.random.Generator,
+                                   max_group_run: int) -> list[np.ndarray]:
+        """
+        One epoch of flow indices, arranged so same-group flows share a batch.
+
+        A contrastive term can only see positives that are *in the batch*, and
+        epoch_flow_batches shuffles globally -- with tens of thousands of groups a
+        random batch of 256 would hold almost none. This block-shuffles instead:
+        flows are shuffled within their group, each group is cut into runs of at
+        most max_group_run flows, the runs are shuffled, and the concatenation is
+        chunked into batches. Every flow is still visited exactly once per epoch,
+        so the reconstruction objective sees the same data it did without grouping.
+
+        max_group_run is what keeps negatives in the batch. Without it a single
+        large group -- an IoT capture usually has a broker or gateway that appears
+        in a large share of the flows -- would fill whole consecutive batches with
+        one label, leaving those batches with no negatives to push against.
+        batch_size // 4 puts at least four runs in every batch.
+
+        Note this yields distinct *flows* per group, one random window each (via
+        draw_latent_batch); it never pairs two windows of the same flow, which
+        would be near-duplicate packets and trivially satisfiable.
+
+        Args:
+            group_ids:     (F,) int label per flow, from flow_group_ids.
+            batch_size:    flows per batch.
+            rng:           the run's Generator.
+            max_group_run: longest uninterrupted run of one group.
+
+        Returns:
+            list of (<=batch_size,) int64 flow-index arrays.
+        """
+        if group_ids.shape[0] != len(self.starts):
+            raise ValueError(f"group_ids has {group_ids.shape[0]} entries but the cache "
+                             f"holds {len(self.starts)} flows")
+
+        order = np.argsort(group_ids, kind="stable")
+        bounds = np.flatnonzero(np.diff(group_ids[order])) + 1
+
+        runs = []
+        for members in np.split(order, bounds):
+            members = rng.permutation(members)
+            for i in range(0, members.shape[0], max_group_run):
+                runs.append(members[i:i + max_group_run])
+
+        shuffled = rng.permutation(len(runs))
+        flows = np.concatenate([runs[i] for i in shuffled])
+        return [flows[i:i + batch_size] for i in range(0, flows.shape[0], batch_size)]
+
     def _gather(self, starts: np.ndarray, takes: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
         """(starts, takes) row slices -> ((B, P, D) float32 latents, (B,) lengths)."""
         B = starts.shape[0]
@@ -930,7 +1145,7 @@ class CachedLatentSequenceHandler():
         offsets = np.minimum(offsets, slack)
         return self._gather(self.starts[flow_ids] + offsets, takes)
 
-    def enumerate_windows(self) -> np.ndarray:
+    def enumerate_windows(self, with_flow: bool = False) -> np.ndarray:
         """
         Deterministic, non-overlapping windows over every flow.
 
@@ -938,18 +1153,27 @@ class CachedLatentSequenceHandler():
         than seq_len yields one short window, otherwise floor(L / seq_len) full
         windows and the remainder is dropped.
 
+        Args:
+            with_flow: also return the flow index each window came from, so a
+                       window can be traced back to its flow_key (and from there
+                       to a group label). Off by default -- every existing caller
+                       feeds the result straight into latent_batch_from_windows,
+                       which wants the two-column form.
+
         Returns:
-            np.ndarray: (W, 2) array of (start_row, length) pairs.
+            np.ndarray: (W, 2) of (start_row, length), or (W, 3) of
+                        (flow, start_row, length) when with_flow is set.
         """
         windows = []
-        for start, length in zip(self.starts, self.lengths):
+        for flow, (start, length) in enumerate(zip(self.starts, self.lengths)):
             num_sequences = length // self.seq_len
             if num_sequences == 0:
-                windows.append((start, length))
+                windows.append((flow, start, length))
             else:
                 for i in range(num_sequences):
-                    windows.append((start + i * self.seq_len, self.seq_len))
-        return np.array(windows, dtype=np.int64)
+                    windows.append((flow, start + i * self.seq_len, self.seq_len))
+        out = np.array(windows, dtype=np.int64)
+        return out if with_flow else out[:, 1:]
 
     def latent_batch_from_windows(self, windows: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
         """(W, 2) (start, length) rows -> ((W, P, D) latents, (W,) lengths)."""
