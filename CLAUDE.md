@@ -135,22 +135,31 @@ full pre-merge → merged migration notes.
 
 Data splitting utility (config from constants at the bottom of the file):
 ```
-python -m data_tools.SplitFlowsDF   # flow-level: whole flows per split, long flows cut by time
+python -m data_tools.SplitFlowsDF   # strict wall-clock split; boundaries cut through flows
 ```
 There is only one splitter. `SplitDataDF` — packet-level contiguous row slices that ignored
 flows, and so tore a single flow across train/test/val — was deleted for leakage; do not
 reintroduce a packet-level split, and treat `flow_split/` as the only valid partition.
 
-`SplitFlowsDF` keeps every flow in a single split, cutting only long-lived flows
-chronologically (train -> test -> val), and hits the ratios in packets. It assumes an
-attack-free capture (see its module docstring). It groups on a canonical conversation key
-derived in Python, which was a workaround for the pre-merge extractor writing a directional
-`flow_key` fragmented by `proto_hierarchy`. The merged extractor writes a normalized key
-carrying only the transport token, so on current parquets the canonicalization is a redundant
-no-op mapping each `flow_key` to itself. Nothing still reads the pre-merge parquets, so it can
-be collapsed to a plain `group_by("flow_key")` whenever `data_artefacts/deprecated_*` is
-deleted (see `TODO.md`). The `flow_key` column is written out unchanged either way, so the
-latent-cache path is unaffected.
+`SplitFlowsDF` is a **strict temporal split**: each split is a contiguous wall-clock
+interval, and a flow crossing a boundary is cut at that boundary. Boundaries sit at packet
+quantiles, so the ratios are hit in packets while the splits stay clean time intervals. It
+assumes an attack-free capture (see its module docstring).
+
+**Never select or exclude flows by duration or packet count — under any circumstances.**
+An earlier version cut only flows passing a `long_flow_duration_s` / `min_packets_per_piece`
+gate and kept the rest whole, ordering them by first packet. On a capture whose flows are
+long-lived that produces splits which all span the entire capture: on CICAPT-IIoT Phase 1
+the median conversation lasts 61% of the capture, so every split covered all four days and
+nothing was temporally held out. Going through flows at the boundary is the only sound way
+to split this kind of traffic, and it must apply to every flow uniformly. Do not reintroduce
+length- or duration-conditional handling, quantile gates, or "keep short flows whole"
+shortcuts.
+
+A flow therefore *can* appear in several splits — that is the intended behaviour of a
+temporal split, not leakage. What must not happen is a split boundary that is not a clean
+time boundary. The `flow_key` column is written out unchanged, so the latent-cache path is
+unaffected.
 
 **Do not mix key formats within one artefact lineage.** Re-extracting a capture changes its
 `flow_key` strings, so its split and any latent cache keyed on them

@@ -54,16 +54,16 @@ import os
 # The one knob the capacity sweep varies; the run name carries it so the sweep's runs
 # land in separate directories.
 SEQ_DIM = 512
-RUN_NAME = f"SeqAE_IIoTset_d128_Mamba_s{SEQ_DIM}"
+RUN_NAME = f"SeqAE_CICAPT_d128_Mamba_s{SEQ_DIM}"
 DEVICE_INDEX = 0
 
 ### Set Training Parameters
 # Must match CachePacketLatents' constants -- load_latent_cache compares a sha256 of
 # the checkpoint, so a stale cache fails loudly here rather than training silently.
-DATASET = DATASETS["IIoTset-Ferrag"]
-CACHE_TAG = "PacketAE_d128_best"
-PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_IIoTset_d128/"
-                  "PacketLevelAutoEncoder_PacketAE_IIoTset_d128_best.ckpt")
+DATASET = DATASETS["CICAPT-IIoT"]
+CACHE_TAG = "PacketAE_CICAPT_d128_best"
+PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_CICAPT_d128/"
+                  "PacketLevelAutoEncoder_PacketAE_CICAPT_d128_best.ckpt")
 TRAIN_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "train")
 TEST_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "test")
 # Byte-level eval needs the raw packets, which the latent cache does not hold. This
@@ -75,9 +75,15 @@ SEQ_ENCODER_DIM = SEQ_DIM
 SEQ_DECODER_DIM = SEQ_DIM
 SEQ_BACKBONE = "Mamba"         # "Mamba" | "Transformer" (swap MambaBackboneParams too)
 
-# An epoch is ~27 s off the latent cache (346 steps + eval), so epochs are cheap here
-# in a way they are not at the packet level.
-Epochs = 40
+# An epoch is cheap off the latent cache in a way it is not at the packet level, so the
+# epoch count is set by the total step budget rather than by wall-clock.
+#
+# 160 rather than the 40 the IIoTset run used, because an epoch is one window per flow
+# and CICAPT's train split holds 21829 flows against IIoTset's 88505 -- 86 steps per
+# epoch instead of 346. 40 epochs would be 3440 steps against that run's 13840, which
+# also turns WARMUP_STEPS into 15% of the schedule instead of 3.6%. 160 restores both,
+# so the two runs differ in their data and not in their optimisation budget.
+Epochs = 160
 batch_size = 256
 val_batch_size = 256
 learning_rate = 3e-4

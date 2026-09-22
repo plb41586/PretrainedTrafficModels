@@ -42,8 +42,8 @@ import torch.nn.functional as F
 import math
 
 ### Set Training Parameters
-RUN_NAME = "PacketAE_IIoTset_d128"
-DATASET = DATASETS["IIoTset-Ferrag"]
+RUN_NAME = "PacketAE_CICAPT_d128"
+DATASET = DATASETS["CICAPT-IIoT"]
 DEVICE_INDEX = 0               # AE on cuda:0, the MLM run takes cuda:1 concurrently
 
 ENCODER_DIM = 128              # was 64; the old run's non-pad accuracy plateaued at ~0.554

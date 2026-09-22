@@ -1,456 +1,209 @@
 """
-Flow-aware train/test/val splitter for flow-level models.
+Strict temporal splitter for flow-level models.
 
-`SplitDataDF.py` cuts a packet parquet with contiguous `df.slice()` calls. For packet-level
-pretraining that is fine — a row is an independent sample — but for flow-level models it cuts
-flows at arbitrary points and scatters one flow over several splits.
+Each split is a contiguous wall-clock interval of the capture. A flow that crosses a
+boundary is cut at that boundary — every flow, uniformly, with no exceptions.
 
-This splitter works at flow granularity instead:
+    time ->
+    |------- train -------|-- test --|-- ad_fit --|-- ad_calib --|-- val --|- late -|
+      a flow spanning the capture contributes packets to each interval it covers
 
-  * **Short flows are kept whole** and land in exactly one split.
-  * **Long-lived flows are cut by packet timestamp**, earliest packets first, in the order
-    train -> test -> val.
-  * Split ratios are hit **in packets**, not in flows.
+Boundaries sit at **packet quantiles**, not at even divisions of the clock: the boundary
+for a cumulative share q is the timestamp of the packet at index round(q x N) in global
+time order. That hits the ratios in packets while keeping every split a clean time
+interval, which even wall-clock division would not do when the traffic rate varies.
 
-SCOPE: this tool is for *unsupervised anomaly detection*, on captures that contain **no
-attacks**. Short flows are assigned chronologically, so train/test/val correspond to different
-phases of the capture. Split a labelled attack capture with this and the attack classes end up
-concentrated in whichever split covers their time window. Attack captures stay whole and are
-used as evaluation sets on their own (that is how `AnomalyDetection/` already consumes the
-per-attack parquets).
+Why no flow selection
+---------------------
+There is deliberately no `long_flow_duration_s`, no `min_packets_per_piece`, and no
+"keep short flows whole" path. A previous version cut only flows that passed such gates
+and assigned the rest whole, ordered by first packet. That silently stops being a
+temporal split as soon as flows are long-lived: on CICAPT-IIoT Phase 1 the median
+conversation lasts 61% of the capture, so every split spanned all four days and nothing
+was held out in time at all. Uniform cutting at the boundary is the only sound option,
+and conditioning it on flow length or duration reintroduces exactly that failure.
 
-Flow identity
--------------
-The `flow_key` column written by the **pre-merge** Rust extractor could not be grouped on
-directly:
+A flow appearing in several splits is therefore intended, not leakage. The invariant that
+matters is that the intervals are disjoint and ordered in time, which `_check_intervals`
+asserts before anything is written.
 
-  1. It was **not normalized** — the key was stringified before `normalize()`, which only fed
-     the FlowTracker HashMap. So `A:59573 -> B:1883 (...)` and `B:1883 -> A:59573 (...)` were
-     two keys for one conversation.
-  2. Its protocol component was the **whole proto_hierarchy**, so one TCP connection fragmented
-     into `... (Ethernet->IPv4->TCP)` for bare ACKs and `... (Ethernet->IPv4->TCP->MQTT)` for
-     payload-bearing packets.
+SCOPE: for *unsupervised anomaly detection* on captures containing **no attacks**. Splits
+are time periods, so an attack in a labelled capture would land wholly inside whichever
+split covers its window. Attack captures stay whole and are used as evaluation sets on
+their own.
 
-Either defect leaks half a conversation across the split boundary. We therefore group on a
-canonical *conversation key* derived here in Python (see `conversation_key_map`), while writing
-the `flow_key` column out **untouched** — `PreTrainingDatasetHandler.build_flow_index`,
-`CachePacketLatents.py` and the existing latent caches keep working unchanged.
-
-Both defects are **fixed in the merged extractor** (see `feature_extraction/MIGRATION.md` §4),
-which writes a normalized key whose parenthesised field is a bare transport token — `TCP`,
-`UDP`, `ARP`, `ICMPv4`, `ICMPv6`. On such a key this canonicalization is a correct no-op:
-the regex still parses it, `transport_prefix` returns the single token unchanged, and the
-endpoint ordering is direction-symmetric, so each `flow_key` maps to a distinct `conv_key`
-one-to-one. It is kept because `data_artefacts/` still holds pre-merge parquets; once none are
-in use it collapses to a plain `group_by("flow_key")` (see TODO.md).
+Packets sharing a timestamp are never separated: a boundary is snapped forward to the
+first packet of the next distinct timestamp.
 
 Run from the repo root, after editing the constants in the __main__ block:
     python -m data_tools.SplitFlowsDF
 """
 import polars as pl
+import numpy as np
 import json
 from pathlib import Path
 
 
-# `src_ip:src_port -> dst_ip:dst_port (proto)`, where `proto` is a full proto_hierarchy on
-# pre-merge keys and a bare transport token on merged ones. The greedy `.*` binds each port to
-# the *last* colon of its endpoint, which is what lets IPv6 keys parse:
-#   `fe80::b067:5f59:5094:9ba5:0 -> ff02::fb:0 (Ethernet->IPv6->ICMPv6)`
+# `src_ip:src_port -> dst_ip:dst_port (proto)`. Not used by the split itself — it is kept
+# here because `DataUtils._flow_key_pattern` imports it, and the greedy `.*` binding each
+# port to the *last* colon of its endpoint is what lets IPv6 keys parse:
+#   `fe80::b067:5f59:5094:9ba5:0 -> ff02::fb:0 (ICMPv6)`
 FLOW_KEY_RE = r"^(.*):(\d+) -> (.*):(\d+) \((.*)\)$"
 
-# Hierarchy tokens at which we stop when reducing a proto_hierarchy to its transport prefix,
-# so `Ethernet->IPv4->TCP` and `Ethernet->IPv4->TCP->MQTT` collapse to the same conversation.
-# `ICMPv4` is the merged extractor's spelling; a hierarchy with no listed token is returned
-# unchanged by `transport_prefix`, so a bare merged token passes through either way.
-TRANSPORT_TOKENS = {"TCP", "UDP", "ICMP", "ICMPv4", "ICMPv6", "IGMP", "ARP"}
 
-SPLIT_NAMES = ("train", "test", "val")
-
-
-# ── flow identity ────────────────────────────────────────────────────
-
-def transport_prefix(proto_hierarchy: str) -> str:
+def _boundary_indices(ts: np.ndarray, fractions: list[float]) -> list[int]:
     """
-    Reduce a proto_hierarchy to everything up to and including its transport token.
+    Row indices where each split ends, given time-sorted timestamps.
 
-    `Ethernet->IPv4->TCP->MQTT` -> `Ethernet->IPv4->TCP`. A hierarchy with no known transport
-    token is returned unchanged, so unrecognised stacks simply stay as specific as they were.
+    The index for a cumulative share is snapped forward to the start of the next distinct
+    timestamp, so packets recorded at the same instant always land in the same split. That
+    snapping can make a split slightly larger than its target, which is why the report
+    prints achieved ratios rather than assuming the requested ones.
     """
-    tokens = proto_hierarchy.split("->")
-    for i, token in enumerate(tokens):
-        if token in TRANSPORT_TOKENS:
-            return "->".join(tokens[: i + 1])
-    return proto_hierarchy
+    n = ts.shape[0]
+    indices, cumulative = [], 0.0
+    for fraction in fractions[:-1]:
+        cumulative += fraction
+        raw = min(int(round(cumulative * n)), n - 1)
+        indices.append(int(np.searchsorted(ts, ts[raw], side="left")))
+    return indices
 
 
-def conversation_key_map(flow_keys: pl.Series) -> pl.DataFrame:
-    """
-    Build a `flow_key -> conv_key` lookup table.
-
-    Runs on the *unique* flow keys (tens of thousands) rather than on every packet row, so the
-    regex cost is independent of the dataset size.
-
-    The two endpoints are ordered by comparing the strings `ip:port` with the port zero-padded.
-    That order only has to be deterministic and direction-symmetric — it deliberately does not
-    reproduce the numeric `IpAddr` ordering the Rust side uses, because nothing here depends on
-    matching it.
-
-    Args:
-        flow_keys: the `flow_key` column (duplicates fine).
-
-    Returns:
-        pl.DataFrame: columns `flow_key` and `conv_key`, one row per distinct flow key. Keys the
-                      regex cannot parse keep their raw `flow_key` as `conv_key`.
-    """
-    uniq = flow_keys.unique().to_frame("flow_key").with_columns(
-        pl.col("flow_key").str.extract(FLOW_KEY_RE, 1).alias("ip_a"),
-        pl.col("flow_key").str.extract(FLOW_KEY_RE, 2).alias("port_a"),
-        pl.col("flow_key").str.extract(FLOW_KEY_RE, 3).alias("ip_b"),
-        pl.col("flow_key").str.extract(FLOW_KEY_RE, 4).alias("port_b"),
-        pl.col("flow_key").str.extract(FLOW_KEY_RE, 5).alias("proto"),
-    )
-
-    unparsed = uniq.filter(pl.col("ip_a").is_null())
-    if unparsed.height:
-        examples = unparsed["flow_key"].head(3).to_list()
-        print(
-            f"  WARNING: {unparsed.height} of {uniq.height} distinct flow keys did not match "
-            f"{FLOW_KEY_RE!r}; they keep their raw flow_key as conversation key. "
-            f"Examples: {examples}"
-        )
-
-    # A handful of distinct hierarchies -> resolve the transport prefix in python, then map.
-    protos = uniq["proto"].drop_nulls().unique().to_list()
-    proto_map = {p: transport_prefix(p) for p in protos}
-
-    endpoint_a = pl.col("ip_a") + ":" + pl.col("port_a").str.zfill(5)
-    endpoint_b = pl.col("ip_b") + ":" + pl.col("port_b").str.zfill(5)
-
-    return uniq.with_columns(
-        pl.when(endpoint_a <= endpoint_b).then(endpoint_a).otherwise(endpoint_b).alias("ep_lo"),
-        pl.when(endpoint_a <= endpoint_b).then(endpoint_b).otherwise(endpoint_a).alias("ep_hi"),
-        pl.col("proto").replace_strict(proto_map, default=None).alias("transport"),
-    ).with_columns(
-        pl.when(pl.col("ip_a").is_null())
-        .then(pl.col("flow_key"))
-        .otherwise(pl.concat_str(["ep_lo", "ep_hi", "transport"], separator="|"))
-        .alias("conv_key")
-    ).select("flow_key", "conv_key")
-
-
-# ── the split ────────────────────────────────────────────────────────
-
-def _flow_stats(df: pl.DataFrame, ratios: tuple[float, float, float],
-                long_flow_duration_s: float, min_packets_per_piece: int) -> pl.DataFrame:
-    """
-    One row per conversation: extent, packet count, and whether it may be cut.
-
-    A conversation is *long* (cuttable) when it spans more than `long_flow_duration_s` **and**
-    the cut it would produce leaves every piece with at least `min_packets_per_piece` packets.
-    A long-lived but sparse flow that would shatter into unusable fragments is demoted to short
-    and kept whole.
-
-    The packet guard does most of the work on IoT captures, where nearly every conversation is
-    long-lived: it implies a floor of `min_packets_per_piece / min(ratios)` packets before a
-    flow can be cut at all (32 / 0.15 ~= 213 with the defaults). See `min_packets_per_piece` in
-    `split_flows` for why that matters.
-    """
-    cut1 = (pl.col("n_packets") * ratios[0]).round().cast(pl.Int64)
-    cut2 = (pl.col("n_packets") * (ratios[0] + ratios[1])).round().cast(pl.Int64)
-
-    return (
-        df.group_by("conv_key")
-        .agg(
-            pl.col("_ts").min().alias("first_ts"),
-            pl.col("_ts").max().alias("last_ts"),
-            pl.len().alias("n_packets"),
-        )
-        .with_columns(((pl.col("last_ts") - pl.col("first_ts")) / 1e6).alias("duration_s"))
-        .with_columns(_cut1=cut1, _cut2=cut2)
-        .with_columns(
-            pl.min_horizontal(
-                pl.col("_cut1"),
-                pl.col("_cut2") - pl.col("_cut1"),
-                pl.col("n_packets") - pl.col("_cut2"),
-            ).alias("_piece_min")
-        )
-        .with_columns(
-            (
-                (pl.col("duration_s") > long_flow_duration_s)
-                & (pl.col("_piece_min") >= min_packets_per_piece)
-            ).alias("is_long")
-        )
-    )
-
-
-def _assign_short_flows(stats: pl.DataFrame, n_total: int,
-                        ratios: tuple[float, float, float]) -> tuple[pl.DataFrame, dict]:
-    """
-    Assign every whole-kept conversation to one split, chronologically by first packet.
-
-    The long flows have already contributed packets to each split; short flows fill what is left
-    of each packet quota, in the order train -> test -> val. Because the long-flow cuts use the
-    same ratios, the residual quotas stay close to the global ratios.
-
-    Returns:
-        (short flows with a `_short_split` column, quota bookkeeping for the report)
-    """
-    long_stats = stats.filter(pl.col("is_long"))
-    from_long = {
-        "train": int(long_stats["_cut1"].sum()),
-        "test": int((long_stats["_cut2"] - long_stats["_cut1"]).sum()),
-        "val": int((long_stats["n_packets"] - long_stats["_cut2"]).sum()),
-    }
-    targets = {name: n_total * r for name, r in zip(SPLIT_NAMES, ratios)}
-    residual = {name: max(0.0, targets[name] - from_long[name]) for name in SPLIT_NAMES}
-
-    boundary1 = residual["train"]
-    boundary2 = residual["train"] + residual["test"]
-
-    # Packets already claimed by *earlier* short flows -> which bucket this flow starts in.
-    short = (
-        stats.filter(~pl.col("is_long"))
-        .sort("first_ts")
-        .with_columns((pl.col("n_packets").cum_sum() - pl.col("n_packets")).alias("_cum_before"))
-        .with_columns(
-            pl.when(pl.col("_cum_before") < boundary1)
-            .then(pl.lit("train"))
-            .when(pl.col("_cum_before") < boundary2)
-            .then(pl.lit("test"))
-            .otherwise(pl.lit("val"))
-            .alias("_short_split")
-        )
-    )
-
-    bookkeeping = {
-        "target_packets": {k: round(v) for k, v in targets.items()},
-        "packets_from_cut_flows": from_long,
-        "residual_quota_for_whole_flows": {k: round(v) for k, v in residual.items()},
-    }
-    return short, bookkeeping
-
-
-def _check_no_leakage(df: pl.DataFrame, cut_keys: set[str]) -> None:
-    """
-    Two invariants, raised (not warned) before anything is written:
-
-    (a) a conversation may only appear in more than one split if it was deliberately cut;
-    (b) within a cut conversation, split order along the time axis is train -> test -> val,
-        i.e. the per-split time ranges do not interleave.
-    """
-    multi = (
-        df.group_by("conv_key")
-        .agg(pl.col("split").n_unique().alias("n_splits"))
-        .filter(pl.col("n_splits") > 1)["conv_key"]
-        .to_list()
-    )
-    stray = set(multi) - cut_keys
-    if stray:
-        raise AssertionError(
-            f"{len(stray)} conversation(s) span several splits without having been cut, "
-            f"e.g. {sorted(stray)[:3]}"
-        )
-
-    if not cut_keys:
-        return
-
-    split_order = (
-        pl.when(pl.col("split") == "train").then(0)
-        .when(pl.col("split") == "test").then(1)
-        .otherwise(2)
-    )
-    out_of_order = (
-        df.filter(pl.col("conv_key").is_in(list(cut_keys)))
-        .sort(["conv_key", "_ts"])
-        .with_columns(split_order.alias("_order"))
-        .select((pl.col("_order").diff().over("conv_key") < 0).any())
-        .item()
-    )
-    if out_of_order:
-        raise AssertionError(
-            "a cut conversation has interleaved splits along the time axis "
-            "(expected all train packets, then all test, then all val)"
-        )
+def _check_intervals(bounds: list[int], ts: np.ndarray, names: list[str]) -> None:
+    """Assert the splits are non-empty, disjoint, and ordered along the time axis."""
+    edges = [0, *bounds, ts.shape[0]]
+    for name, start, end in zip(names, edges, edges[1:]):
+        if end <= start:
+            raise AssertionError(
+                f"split {name!r} is empty (rows {start}:{end}). Its share is too small for "
+                f"this capture, or several splits fell inside one timestamp.")
+    for i, cut in enumerate(bounds):
+        if ts[cut - 1] >= ts[cut]:
+            raise AssertionError(
+                f"boundary between {names[i]!r} and {names[i + 1]!r} falls inside a single "
+                f"timestamp ({ts[cut]}); the intervals would overlap in time.")
 
 
 def split_flows(
     data_file: str | Path,
     output_dir: str | Path,
-    train_size: float = 0.70,
-    test_size: float = 0.15,
-    val_size: float = 0.15,
-    long_flow_duration_s: float = 600.0,
-    min_packets_per_piece: int = 32,
+    splits: tuple[tuple[str, float], ...],
     dry_run: bool = False,
 ) -> dict[str, pl.DataFrame]:
     """
-    Split a packet parquet into train/test/val at flow granularity.
+    Split a packet parquet into contiguous time intervals.
 
     Args:
-        data_file:             Input packet parquet (schema: proto_hierarchy, flow_key,
-                               timestamp_s, timestamp_us, data, mask, header_len).
-        output_dir:            Directory for train/test/val.parquet + split_report.json.
-        train_size:            Packet fraction for training   (default 0.70).
-        test_size:             Packet fraction for test       (default 0.15).
-        val_size:              Packet fraction for validation (default 0.15).
-        long_flow_duration_s:  Flows spanning longer than this may be cut across splits.
-        min_packets_per_piece: A cut is only performed if every piece keeps at least this many
-                               packets; otherwise the flow is kept whole. Deliberately
-                               independent of PACKETS_PER_SEQUENCE in the sequence-level
-                               training script — it is about not producing degenerate
-                               fragments, not about the model's window size.
-                               This is the knob that separates "short but long-lived" from
-                               "unwieldy" on IoT captures, and it is sharp: on
-                               NormalMerged.parquet (9.7M packets, median conversation 69
-                               packets over 1565 s) a value of 8 cuts 98810 of 129073
-                               conversations, while 32 cuts 28 of them — the handful of
-                               static-port device channels, up to 264k packets each, holding
-                               4.4% of all packets. Re-check with a dry run on new data.
-        dry_run:               Compute and print the report, write nothing.
+        data_file:  Input packet parquet (proto_hierarchy, flow_key, timestamp_s,
+                    timestamp_us, data, mask, header_len).
+        output_dir: Directory for <name>.parquet + split_report.json.
+        splits:     Ordered `(name, fraction)` pairs in time order; fractions are packet
+                    shares and must sum to 1.0.
+        dry_run:    Print the report, write nothing.
 
     Returns:
-        Dict with keys "train", "test", "val" mapping to the split DataFrames (empty dict on a
-        dry run).
+        Dict mapping each split name to its DataFrame (empty on a dry run).
     """
-    total = train_size + test_size + val_size
-    if not (0.999 <= total <= 1.001):
-        raise ValueError(
-            f"Split sizes must sum to 1.0, got {total:.4f} "
-            f"(train={train_size}, test={test_size}, val={val_size})"
-        )
-    ratios = (train_size, test_size, val_size)
+    names = [name for name, _ in splits]
+    fractions = [fraction for _, fraction in splits]
+    if len(set(names)) != len(names):
+        raise ValueError(f"split names must be unique, got {names}")
+    if not (0.999 <= sum(fractions) <= 1.001):
+        raise ValueError(f"fractions must sum to 1.0, got {sum(fractions):.4f}")
 
     data_file = Path(data_file)
     df = pl.read_parquet(data_file)
-    original_columns = df.columns
-    required = {"flow_key", "timestamp_s", "timestamp_us"}
-    missing = required - set(original_columns)
+    missing = {"flow_key", "timestamp_s", "timestamp_us"} - set(df.columns)
     if missing:
-        raise ValueError(f"{data_file.name} is missing required column(s): {sorted(missing)}")
-    n_total = df.height
-    print(f"Loaded {data_file.name}: {n_total} rows, {len(original_columns)} columns")
+        raise ValueError(f"{data_file.name} is missing column(s): {sorted(missing)}")
 
-    # --- flow identity + a single integer time axis ---
-    print("Deriving conversation keys")
-    key_map = conversation_key_map(df["flow_key"])
-    df = df.join(key_map, on="flow_key", how="left").with_columns(
+    columns = df.columns
+    df = df.with_columns(
         (pl.col("timestamp_s") * 1_000_000 + pl.col("timestamp_us")).alias("_ts")
-    )
-    print(
-        f"  {df['flow_key'].n_unique()} raw flow keys -> {df['conv_key'].n_unique()} conversations"
-    )
+    ).sort("_ts")
+    ts = df["_ts"].to_numpy()
+    print(f"Loaded {data_file.name}: {ts.shape[0]} packets spanning "
+          f"{(ts[-1] - ts[0]) / 1e6:.0f} s")
 
-    # --- who gets cut, who stays whole ---
-    stats = _flow_stats(df, ratios, long_flow_duration_s, min_packets_per_piece)
-    n_long = int(stats["is_long"].sum())
-    cut_keys = set(stats.filter(pl.col("is_long"))["conv_key"].to_list())
-    print(
-        f"  {n_long} conversation(s) exceed {long_flow_duration_s}s and are cut across splits; "
-        f"{stats.height - n_long} kept whole"
-    )
+    bounds = _boundary_indices(ts, fractions)
+    _check_intervals(bounds, ts, names)
 
-    short, quota_report = _assign_short_flows(stats, n_total, ratios)
+    edges = [0, *bounds, ts.shape[0]]
+    lengths = [end - start for start, end in zip(edges, edges[1:])]
+    df = df.with_columns(pl.Series("split", np.repeat(names, lengths)))
 
-    # --- per-packet assignment ---
-    df = (
-        df.join(stats.filter(pl.col("is_long")).select("conv_key", "_cut1", "_cut2"),
-                on="conv_key", how="left")
-        .join(short.select("conv_key", "_short_split"), on="conv_key", how="left")
-        .sort(["conv_key", "_ts"])
-        .with_columns(pl.int_range(pl.len()).over("conv_key").alias("_rank"))
-        .with_columns(
-            pl.when(pl.col("_cut1").is_null())
-            .then(pl.col("_short_split"))
-            .when(pl.col("_rank") < pl.col("_cut1"))
-            .then(pl.lit("train"))
-            .when(pl.col("_rank") < pl.col("_cut2"))
-            .then(pl.lit("test"))
-            .otherwise(pl.lit("val"))
-            .alias("split")
-        )
-    )
-
-    _check_no_leakage(df, cut_keys)
-
-    # --- report ---
-    quantiles = [0.5, 0.75, 0.9, 0.95, 0.99, 0.999, 1.0]
     report = {
         "data_file": str(data_file),
         "output_dir": str(output_dir),
-        "ratios": {"train": train_size, "test": test_size, "val": val_size},
-        "long_flow_duration_s": long_flow_duration_s,
-        "min_packets_per_piece": min_packets_per_piece,
-        "total_packets": n_total,
-        "raw_flow_keys": df["flow_key"].n_unique(),
-        "conversations": stats.height,
-        "conversations_cut": n_long,
-        "conversations_whole": stats.height - n_long,
-        "packets_in_cut_conversations": int(stats.filter(pl.col("is_long"))["n_packets"].sum()),
-        "conversation_duration_s_quantiles": {
-            str(q): float(stats["duration_s"].quantile(q)) for q in quantiles
-        },
-        "conversation_packets_quantiles": {
-            str(q): float(stats["n_packets"].quantile(q)) for q in quantiles
-        },
-        **quota_report,
-        "splits": {},
+        "requested": dict(splits),
+        "total_packets": ts.shape[0],
+        "flow_keys": df["flow_key"].n_unique(),
+        "capture_span_s": (ts[-1] - ts[0]) / 1e6,
+        "achieved": {},
     }
-    for name in SPLIT_NAMES:
+    for name in names:
         part = df.filter(pl.col("split") == name)
-        report["splits"][name] = {
+        first, last = int(part["_ts"].min()), int(part["_ts"].max())
+        report["achieved"][name] = {
             "packets": part.height,
-            "achieved_ratio": part.height / n_total if n_total else 0.0,
-            "conversations": part["conv_key"].n_unique(),
-            "raw_flow_keys": part["flow_key"].n_unique(),
-            "first_ts_us": int(part["_ts"].min()) if part.height else None,
-            "last_ts_us": int(part["_ts"].max()) if part.height else None,
+            "ratio": part.height / ts.shape[0],
+            "flow_keys": part["flow_key"].n_unique(),
+            "first_ts_us": first,
+            "last_ts_us": last,
+            "span_s": (last - first) / 1e6,
         }
+    # How many flows the boundaries cut, i.e. appear in more than one interval. Expected to
+    # be large on long-lived traffic; reported so the scale of the cutting is visible.
+    spans = (df.group_by("flow_key").agg(pl.col("split").n_unique().alias("n"))
+             .filter(pl.col("n") > 1).height)
+    report["flow_keys_crossing_a_boundary"] = spans
 
     print(json.dumps(report, indent=2))
-
     if dry_run:
         print("Dry run: nothing written.")
         return {}
 
-    # --- write ---
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    splits: dict[str, pl.DataFrame] = {}
-    for name in SPLIT_NAMES:
-        part = df.filter(pl.col("split") == name).sort("_ts").select(original_columns)
-        out_path = output_dir / f"{name}.parquet"
-        part.write_parquet(out_path)
-        splits[name] = part
-        print(f"  {name:>5}: {part.height:>9} rows  ->  {out_path}")
-
+    out = {}
+    for name in names:
+        part = df.filter(pl.col("split") == name).select(columns)
+        part.write_parquet(output_dir / f"{name}.parquet")
+        out[name] = part
+        print(f"  {name:>9}: {part.height:>9} rows  ->  {output_dir / f'{name}.parquet'}")
     with open(output_dir / "split_report.json", "w") as f:
         json.dump(report, f, indent=2)
     print(f"  report -> {output_dir / 'split_report.json'}")
-
-    return splits
+    return out
 
 
 # ── Configure and run ────────────────────────────────────────────────
 if __name__ == "__main__":
 
     # Normal-only capture — see the SCOPE note in the module docstring.
-    DATA_FILE = "data_artefacts/merged_extractor/IIoTset-Ferrag/NormalMerged.parquet"
-    OUTPUT_DIR = "data_artefacts/merged_extractor/IIoTset-Ferrag/flow_split"
-    TRAIN_SIZE = 0.70
-    TEST_SIZE = 0.15
-    VAL_SIZE = 0.15
-    LONG_FLOW_DURATION_S = 600.0   # 10 min; check the quantiles in a dry run before trusting it
-    MIN_PACKETS_PER_PIECE = 32     # ~213 packets before a flow is cut at all -- see docstring
-    DRY_RUN = False                # set True to print the report without writing
+    DATA_FILE = "data_artefacts/merged_extractor/CICAPT-IIoT/CICAPT_Phase1.parquet"
+    OUTPUT_DIR = "data_artefacts/merged_extractor/CICAPT-IIoT/flow_split"
+
+    # One role per split, in time order, so none has to be spent twice:
+    #   train     packet/sequence AE pretraining
+    #   test      monitored during AE training, picks the checkpoint
+    #   ad_fit    fits the anomaly detectors
+    #   ad_calib  score quantiles -> thresholds (no labels)
+    #   val       final held-out normals; the reported false-positive rate
+    #   late      unseen tail, the temporal confound floor
+    SPLITS = (
+        ("train",    0.55),
+        ("test",     0.10),
+        ("ad_fit",   0.10),
+        ("ad_calib", 0.10),
+        ("val",      0.10),
+        ("late",     0.05),
+    )
+    DRY_RUN = False   # set True to print the report without writing
 
     split_flows(
         data_file=DATA_FILE,
         output_dir=OUTPUT_DIR,
-        train_size=TRAIN_SIZE,
-        test_size=TEST_SIZE,
-        val_size=VAL_SIZE,
-        long_flow_duration_s=LONG_FLOW_DURATION_S,
-        min_packets_per_piece=MIN_PACKETS_PER_PIECE,
+        splits=SPLITS,
         dry_run=DRY_RUN,
     )

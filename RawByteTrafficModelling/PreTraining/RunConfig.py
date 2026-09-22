@@ -49,13 +49,32 @@ DATA_ROOT = "data_artefacts/merged_extractor"
 class DatasetPaths:
     """Where one capture's artefacts live, relative to the workspace root.
 
-    Only the flow-grouped split is exposed: whole flows live in exactly one
-    split, so packet-level and sequence-level work can share the partition
-    without a flow ever straddling two of them. The old packet-level `split/`
-    partition (contiguous row slices, flows torn across splits) is gone along
-    with the splitter that produced it.
+    Only the `flow_split/` partition is exposed. The old packet-level `split/`
+    partition (contiguous row slices) is gone along with the splitter that
+    produced it.
+
+    `SplitFlowsDF` is a strict temporal splitter, so a split is a contiguous
+    wall-clock interval and a flow crossing a boundary appears on both sides.
+    Do not assume a flow lives in exactly one split -- an earlier version of
+    this docstring claimed that, and it is false by design (see CLAUDE.md).
+
+    Captures differ in which splits they have: the IIoTset tree predates the
+    six-role layout and carries only train/test/val. `splits` is the authority,
+    and `split()` validates against it, so a name that does not exist fails
+    here rather than as an unreadable-parquet error later.
+
+    Args:
+        name:        directory under DATA_ROOT.
+        source:      the attack-free capture parquet the split was cut from.
+        splits:      every split name present in `flow_split/`.
+        has_attacks: whether an `attacks/` directory exists. `attacks` is None
+                     when it does not, so callers branch on it rather than on a
+                     path that silently does not resolve.
     """
     name: str
+    source: str = "NormalMerged.parquet"
+    splits: tuple[str, ...] = ("train", "test", "val")
+    has_attacks: bool = True
 
     @property
     def root(self) -> str:
@@ -63,29 +82,38 @@ class DatasetPaths:
 
     @property
     def normal(self) -> str:
-        return f"{self.root}/NormalMerged.parquet"
+        """The attack-free source capture the split was cut from."""
+        return f"{self.root}/{self.source}"
 
     @property
-    def attacks(self) -> str:
-        return f"{self.root}/attacks"
+    def attacks(self) -> str | None:
+        return f"{self.root}/attacks" if self.has_attacks else None
+
+    def split(self, which: str) -> str:
+        """Path to one split parquet, checked against `splits`."""
+        if which not in self.splits:
+            raise KeyError(f"{self.name} has no split {which!r}; it has {self.splits}")
+        return f"{self.split_dir}/{which}.parquet"
 
     @property
     def split_dir(self) -> str:
         return f"{self.root}/flow_split"
 
+    # The three original roles keep their properties so the existing scripts read
+    # unchanged; anything else goes through split().
     @property
     def train(self) -> str:
-        return f"{self.split_dir}/train.parquet"
+        return self.split("train")
 
     @property
     def test(self) -> str:
         """Monitored during training."""
-        return f"{self.split_dir}/test.parquet"
+        return self.split("test")
 
     @property
     def val(self) -> str:
         """Final held-out set -- not read by the pretraining scripts."""
-        return f"{self.split_dir}/val.parquet"
+        return self.split("val")
 
     @property
     def split_report(self) -> str:
@@ -95,7 +123,21 @@ class DatasetPaths:
         return f"{self.split_dir}/latents_{tag}/{split}"
 
 
-DATASETS = {"IIoTset-Ferrag": DatasetPaths("IIoTset-Ferrag")}
+DATASETS = {
+    # Cut by the pre-2026-09 flow-selection splitter into three splits. Its splits each
+    # span the whole capture (see the note in EmbeddingADSuite), so they are held-out
+    # populations rather than held-out periods.
+    "IIoTset-Ferrag": DatasetPaths("IIoTset-Ferrag"),
+    # Strict temporal split, six roles, one per consumer: train pretrains the AEs, test
+    # picks their checkpoint, ad_fit fits the detectors, ad_calib turns scores into
+    # thresholds, val is the reported false-positive rate, late is the drift floor.
+    "CICAPT-IIoT": DatasetPaths(
+        "CICAPT-IIoT",
+        source="CICAPT_Phase1.parquet",
+        splits=("train", "test", "ad_fit", "ad_calib", "val", "late"),
+        has_attacks=False,
+    ),
+}
 
 
 # --- Run scaffolding --------------------------------------------------------
