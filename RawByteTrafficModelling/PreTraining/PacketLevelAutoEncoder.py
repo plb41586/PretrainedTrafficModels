@@ -10,9 +10,11 @@ everything downstream.
 Run from the repo root:
     python -m RawByteTrafficModelling.PreTraining.PacketLevelAutoEncoder
 
-Reads the flow-grouped split: whole flows live in exactly one split, so the
-sequence level can reuse the same partition without a flow straddling two of
-them. val.parquet is deliberately untouched -- it is the final held-out set.
+Reads the temporal flow_split: each split is a contiguous wall-clock interval and
+a flow crossing a boundary is cut there, so the same flow_key can appear in
+several splits (see docs/components/02-temporal-split.md). The sequence level
+reuses the same partition. val.parquet is deliberately untouched -- it is the
+final held-out set.
 """
 from RawByteTrafficModelling.ModelComponents.ModelDefinitions import (
     AutoEncoderParams,

@@ -56,7 +56,7 @@ class DatasetPaths:
     `SplitFlowsDF` is a strict temporal splitter, so a split is a contiguous
     wall-clock interval and a flow crossing a boundary appears on both sides.
     Do not assume a flow lives in exactly one split -- an earlier version of
-    this docstring claimed that, and it is false by design (see CLAUDE.md).
+    this docstring claimed that, and it is false by design (see docs/components/02-temporal-split.md).
 
     Captures differ in which splits they have: the IIoTset tree predates the
     six-role layout and carries only train/test/val. `splits` is the authority,

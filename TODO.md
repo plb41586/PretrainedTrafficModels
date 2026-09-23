@@ -32,14 +32,27 @@ run on the first non-ARP/ICMP/TCP/UDP packet — are all **fixed** by the merged
       `PacketAE_IIoTset_d128_best` (sha256 pinned in each `meta.json`) and verified end to end
       with `CheckLatentCache.py` on both splits. Every downstream script was repointed at the
       merged-extractor tree in the same pass.
-- [ ] **Then simplify `SplitFlowsDF.py`.** Once no pre-merge parquet is still in use,
-      `conversation_key_map` / `transport_prefix` / `FLOW_KEY_RE` collapse to a plain
-      `group_by("flow_key")`. Until then they are a correct no-op on new keys, so leaving them
-      in costs only a little work per run.
-      **Now unblocked:** as of the repointing above, no script references
-      `data_artefacts/deprecated_*` any more — every consumer reads the merged-extractor tree.
-      The canonicalization is a pure no-op on these keys, so it can be collapsed whenever the
-      deprecated parquets are deleted for good.
+- [x] **Then simplify `SplitFlowsDF.py`.** Done: the key canonicalization
+      (`conversation_key_map` / `transport_prefix`) is gone, and the splitter is now the strict
+      temporal splitter. Only `FLOW_KEY_RE` remains, because `DataUtils.parse_flow_key` uses it.
+
+## Refactor: make stages 6–7 work for datasets other than IIoTset
+
+Blocks running the pipeline end to end on a second capture. The details are in the
+linked docs, so they are not repeated here. Mechanism changes (role mapping, how to handle
+oversize frames, re-splitting) need to be agreed with the user before implementing.
+
+- [ ] **The export fails for a capture without `attacks/`.** `SequenceEmbeddingAD.py`
+      calls `os.listdir(None)` → `docs/components/06-flow-embedding-export.md § Known gaps`.
+- [ ] **The export does not cover the six-role splits.** `TOKEN_SETS` lists only `val`, so
+      `ad_fit` / `ad_calib` / `late` are never exported → same section.
+- [ ] **`EmbeddingADSuite.py` still uses `train` / `test` / `val` for its roles** instead of
+      `ad_fit` / `ad_calib` / `val` → `docs/components/07-anomaly-detection.md § Known gaps`.
+- [ ] **IIoTset-Ferrag was split by the old flow-selection splitter.** Re-splitting it
+      means regenerating its caches and retraining every model on it →
+      `docs/components/02-temporal-split.md § Current state`.
+- [ ] **`ID_Encoder` raises on frames of 1520 bytes or more** (jumbo frames, TSO/GRO captures)
+      → `docs/reference/data-representation.md § Constants`.
 
 ## Known gaps carried over from the merge
 
@@ -52,8 +65,7 @@ run on the first non-ARP/ICMP/TCP/UDP packet — are all **fixed** by the merged
 
 ## Documentation
 
-- [ ] `CLAUDE.md` documents `AttackLabel` and `FlowID` columns under "Data conventions", but no
-      parquet in `data_artefacts/` has either. Attack labelling is by file name
-      (`attacks/<Class>.parquet`) and the flow identifier is the `flow_key` string. The
-      `TrainingDatasetHandler` / `ValidationDatasetHandler` classes in `DataUtils.py` that rely
-      on those columns are dead against the current artefacts.
+- [x] `CLAUDE.md` documented `AttackLabel` and `FlowID` columns that no parquet has. Fixed:
+      the project description now lives in `docs/` (see `docs/reference/artefacts.md`), which
+      records that labelling is by file name and that the flow identifier is `flow_key`.
+      `TrainingDatasetHandler` / `ValidationDatasetHandler` are still dead code in `DataUtils.py`.

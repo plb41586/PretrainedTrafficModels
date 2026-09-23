@@ -924,8 +924,7 @@ def flow_group_labels(flow_keys: list[str], coarse: str = "endpoint_pair",
 
     The endpoint ordering is a plain lexicographic sort of the two address strings.
     It deliberately does not reproduce the Rust side's numeric IpAddr ordering --
-    all that is required is that it be deterministic and direction-symmetric, which
-    conversation_key_map in data_tools/SplitFlowsDF.py notes for the same reason.
+    all that is required is that it be deterministic and direction-symmetric.
 
     Fine labels are built *from* the coarse label, so fine groups strictly partition
     coarse ones -- the nesting a two-level contrastive objective needs. Whether a
@@ -1004,9 +1003,9 @@ def group_support(train_ids: np.ndarray, eval_ids: np.ndarray,
 
     "Seen in training" is not the same as "trained on". On IIoTset-Ferrag the endpoint
     pair carrying 65% of test windows is present in train too -- as four flows, three
-    of them ModbusTCP against 13,351 MQTT flows in test, because SplitFlowsDF assigns
-    whole conversations chronologically and that pair's MQTT workload starts late in
-    the capture. A contrastive term saw essentially nothing of that group, so pooled
+    of them ModbusTCP against 13,351 MQTT flows in test, because the earlier
+    flow-selection splitter that cut IIoTset assigned whole conversations by first
+    packet and that pair's MQTT workload starts late in the capture. A contrastive term saw essentially nothing of that group, so pooled
     structure metrics on the eval split would be dominated by flows it never shaped.
 
     Args:

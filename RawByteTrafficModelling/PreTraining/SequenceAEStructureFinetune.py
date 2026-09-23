@@ -31,8 +31,9 @@ discovered in the numbers:
     supcon averages per group before averaging across groups (balance_groups). A plain
     anchor mean would hand one endpoint pair a quarter of the loss.
   - The pair holding 65% of *test* windows is present in train as four flows, three of
-    them ModbusTCP against 13,351 MQTT flows in test -- SplitFlowsDF assigns whole
-    conversations chronologically and that workload starts late in the capture. Pooled
+    them ModbusTCP against 13,351 MQTT flows in test -- the earlier flow-selection
+    splitter that cut IIoTset assigned whole conversations by first packet, and that
+    workload starts late in the capture. Pooled
     structure metrics on test would therefore be dominated by a group the contrastive
     term never shaped, so every structure metric is also reported over the supported
     groups alone (`*_sup`).

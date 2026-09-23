@@ -4,7 +4,7 @@ Packet-level masked language model pretraining.
 A fraction of each packet's byte tokens is masked and reconstructed from context,
 with an auxiliary protocol-hierarchy classification loss on the pooled CLS vector.
 This is the alternative to PacketLevelAutoEncoder for producing a packet encoder;
-both are trained on the same flow-grouped split at the same width so the two
+both are trained on the same temporal flow_split at the same width so the two
 backbones are comparable.
 
 Run from the repo root:
