@@ -3,8 +3,9 @@ UMAP projection of exported flow/packet embeddings.
 
 What is compared to what: the reference is the **test split** (held-out normal
 traffic, monitored during training), and everything else plotted is a per-capture
-attack set. train is excluded (the models fit it) and **val is excluded on purpose**
--- it is the final held-out set, spent once in a single final evaluation.
+attack set. train is not read (the models fit it), and neither are the AD splits:
+**val is left out on purpose**, since it is the final held-out set, spent once in a
+single final evaluation. DATA_ROLES below is the complete list of what is read.
 
 The UMAP manifold is fit on the test normals **alone**; attacks are transformed into
 it. Fitting on the union would let a large attack set help define the space it is
@@ -30,6 +31,7 @@ Run from the repo root:
     python -m RawByteTrafficModelling.AnomalyDetection.embedding_viz
 """
 from pathlib import Path
+import logging
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -39,18 +41,28 @@ import polars as pl
 import numpy as np
 import umap
 
+from RawByteTrafficModelling.AnomalyDetection.EmbeddingAD.data import (
+    embedding_sections,
+    load_embedding_dir,
+)
+from RawByteTrafficModelling.PreTraining.RunConfig import ALL_ATTACKS, DataRoles
+
 DATA_DIR = Path("RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_SeqAEStruct_IIoTset_d128_Mamba_s512_pair_l010")
 SEED = 42
 
 # --- What is compared to what ------------------------------------------------
+# The only sets this script reads (RunConfig.DataRoles; each read is logged).
 # Reference ("normal") is the TEST split: held out from packet- and sequence-AE
 # training, monitored during it. Attacks are the per-capture attack sets.
 #
-# train is excluded because the models fit it, so it cannot say anything about
-# generalisation. val is excluded deliberately: it is the final held-out set and is
-# spent once, in a single final evaluation -- do not add it here to "check".
-NORMAL_SET = "test"
-EXCLUDED_SETS = {"train", "val"}
+# train is left out because the models fit it, so it cannot say anything about
+# generalisation. The AD splits (ad_fit, ad_calib, val, late) are left out deliberately:
+# val is the final held-out set, spent once in EmbeddingADSuite -- do not add it here
+# to "check".
+DATA_ROLES = {
+    "reference": ("test",),
+    "attack":    (ALL_ATTACKS,),
+}
 
 NORMAL_CAP = 8000       # the background cloud, so sampled denser than any attack
 ATTACK_CAP = 3000
@@ -77,33 +89,27 @@ rng = np.random.default_rng(SEED)
 # ---- load ------------------------------------------------------------------
 # Row i of metadata.parquet describes row i of the stacked matrix, in sorted-label
 # order -- the contract SequenceEmbeddingAD writes to. Verified per label below.
-meta = pl.read_parquet(DATA_DIR / "metadata.parquet")
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+roles = DataRoles(DATA_ROLES, embedding_sections(DATA_DIR), logging.getLogger(__name__))
+if len(roles.sections("reference")) != 1:
+    raise ValueError("embedding_viz draws exactly one reference split")
+(NORMAL_SET,) = roles.sections("reference")
+# load_embedding_dir reads only the mapped sets and checks them against the metadata.
+X_all, meta = load_embedding_dir(DATA_DIR, roles)
+all_labels = meta["label"].to_numpy()
 
-X_parts, labels, seq_lens = [], [], []
-for f in sorted(DATA_DIR.glob("*.npy")):
-    # "umap_*" are this script's own outputs written into the same directory; without
-    # this they get globbed back in as if they were an embedding set.
-    if f.stem in EXCLUDED_SETS or f.stem.startswith("umap_"):
-        continue
-    arr = np.load(f)
-    rows = meta.filter(pl.col("label") == f.stem)
-    assert rows.height == arr.shape[0], (
-        f"{f.stem}: {arr.shape[0]} embeddings but {rows.height} metadata rows -- "
-        f"the .npy files and metadata.parquet are out of sync")
+take = []
+for name in sorted(set(all_labels.tolist())):
+    idx = np.flatnonzero(all_labels == name)
+    n = NORMAL_CAP if name == NORMAL_SET else ATTACK_CAP
+    take.append(rng.choice(idx, min(n, idx.size), replace=False))
+take = np.concatenate(take)
 
-    n = NORMAL_CAP if f.stem == NORMAL_SET else ATTACK_CAP
-    take = rng.choice(arr.shape[0], min(n, arr.shape[0]), replace=False)
-
-    X_parts.append(arr[take])
-    labels += [f.stem] * take.shape[0]
-    seq_lens.append(rows["seq_len"].to_numpy()[take])
-
-X = np.vstack(X_parts).astype(np.float32)
-labels = np.array(labels)
-seq_lens = np.concatenate(seq_lens)
+X = X_all[take]
+labels = all_labels[take]
+seq_lens = meta["seq_len"].to_numpy()[take]
 is_normal = labels == NORMAL_SET
 attack_names = [c for c in sorted(set(labels)) if c != NORMAL_SET]
-print(f"excluded from this view: {sorted(EXCLUDED_SETS)}")
 print(f"{X.shape[0]} points, {X.shape[1]} dims, "
       f"{is_normal.sum()} normal ({NORMAL_SET}) / {(~is_normal).sum()} attack, "
       f"{len(attack_names)} attack sets")

@@ -54,21 +54,21 @@ import os
 # The one knob the capacity sweep varies; the run name carries it so the sweep's runs
 # land in separate directories.
 SEQ_DIM = 512
-RUN_NAME = f"SeqAE_CICAPT_d128_Mamba_s{SEQ_DIM}"
+RUN_NAME = f"SeqAE_IIoTset_d128_Mamba_s{SEQ_DIM}"
 DEVICE_INDEX = 0
 
 ### Set Training Parameters
 # Must match CachePacketLatents' constants -- load_latent_cache compares a sha256 of
 # the checkpoint, so a stale cache fails loudly here rather than training silently.
-DATASET = DATASETS["CICAPT-IIoT"]
-CACHE_TAG = "PacketAE_CICAPT_d128_best"
-PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_CICAPT_d128/"
-                  "PacketLevelAutoEncoder_PacketAE_CICAPT_d128_best.ckpt")
+DATASET = DATASETS["IIoTset-Ferrag"]
+CACHE_TAG = "PacketAE_IIoTset_d128_best"
+PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_IIoTset_d128/"
+                  "PacketLevelAutoEncoder_PacketAE_IIoTset_d128_best.ckpt")
 TRAIN_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "train")
 TEST_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "test")
 # Byte-level eval needs the raw packets, which the latent cache does not hold. This
 # must be the parquet TEST_LATENT_CACHE was built from (asserted against its meta.json).
-VAL_SPLIT_FILE = DATASET.test
+TEST_SPLIT_FILE = DATASET.test
 
 PACKETS_PER_SEQUENCE = 65      # P, including the slot the seq-CLS overwrites
 SEQ_ENCODER_DIM = SEQ_DIM
@@ -78,12 +78,13 @@ SEQ_BACKBONE = "Mamba"         # "Mamba" | "Transformer" (swap MambaBackbonePara
 # An epoch is cheap off the latent cache in a way it is not at the packet level, so the
 # epoch count is set by the total step budget rather than by wall-clock.
 #
-# 160 rather than the 40 the IIoTset run used, because an epoch is one window per flow
-# and CICAPT's train split holds 21829 flows against IIoTset's 88505 -- 86 steps per
-# epoch instead of 346. 40 epochs would be 3440 steps against that run's 13840, which
-# also turns WARMUP_STEPS into 15% of the schedule instead of 3.6%. 160 restores both,
-# so the two runs differ in their data and not in their optimisation budget.
-Epochs = 160
+# The reference budget is the original IIoTset run: 40 epochs x 346 steps = 13840 steps,
+# with WARMUP_STEPS 3.6% of the schedule. An epoch is one window per flow, so the epoch
+# count scales inversely with the train flow count to hold that budget:
+#   IIoTset six-role train  78691 flows -> ~308 steps/epoch -> 45 epochs (~13.9k steps)
+#   CICAPT train            21829 flows ->   86 steps/epoch -> 160 epochs
+# so runs differ in their data and not in their optimisation budget.
+Epochs = 45
 batch_size = 256
 val_batch_size = 256
 learning_rate = 3e-4
@@ -194,8 +195,8 @@ logger.info(f"Trainable parameters: {sum(p.numel() for p in trainable)}")
 # CachePacketLatents wrote; the flow_key assert pins that down and the re-encode
 # check below catches any residual misalignment, which would otherwise show up as
 # a mysteriously terrible metric rather than an error.
-assert val_meta["split_file"] == VAL_SPLIT_FILE, (
-    f"byte eval would read {VAL_SPLIT_FILE} but {TEST_LATENT_CACHE} was built "
+assert val_meta["split_file"] == TEST_SPLIT_FILE, (
+    f"byte eval would read {TEST_SPLIT_FILE} but {TEST_LATENT_CACHE} was built "
     f"from {val_meta['split_file']}")
 
 pad_id = packet_ae_params.ENC_Params.SpecialTokens["<pad>"]
@@ -204,9 +205,9 @@ packet_decoder = packet_ae.decoder.to(device).eval()
 for p in packet_decoder.parameters():
     p.requires_grad = False
 
-logger.info(f"Building byte-eval subset from {VAL_SPLIT_FILE} "
+logger.info(f"Building byte-eval subset from {TEST_SPLIT_FILE} "
             f"({BYTE_EVAL_WINDOWS} windows; sorts the split, takes a moment)")
-val_split = pl.read_parquet(VAL_SPLIT_FILE)
+val_split = pl.read_parquet(TEST_SPLIT_FILE)
 byte_encoder = ID_Encoder(SpecialIDs=packet_ae_params.ENC_Params.SpecialTokens,
                           CLS_Placement="EOS")   # must match CachePacketLatents
 byte_handler = PreTrainingDatasetHandler(val_split, PACKETS_PER_SEQUENCE - 1, byte_encoder)

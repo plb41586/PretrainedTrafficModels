@@ -1,6 +1,6 @@
 """One-class anomaly detectors over embedding vectors.
 
-Every detector is fitted on the `train` normals alone and exposes the same two calls, so
+Every detector is fitted on the fit-role normals alone and exposes the same two calls, so
 the driver never special-cases one:
 
     det.fit(X_fit, meta_fit)

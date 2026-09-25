@@ -181,8 +181,8 @@ def split_flows(
 if __name__ == "__main__":
 
     # Normal-only capture — see the SCOPE note in the module docstring.
-    DATA_FILE = "data_artefacts/merged_extractor/CICAPT-IIoT/CICAPT_Phase1.parquet"
-    OUTPUT_DIR = "data_artefacts/merged_extractor/CICAPT-IIoT/flow_split"
+    DATA_FILE = "data_artefacts/merged_extractor/IIoTset-Ferrag/NormalMerged.parquet"
+    OUTPUT_DIR = "data_artefacts/merged_extractor/IIoTset-Ferrag/flow_split"
 
     # One role per split, in time order, so none has to be spent twice:
     #   train     packet/sequence AE pretraining

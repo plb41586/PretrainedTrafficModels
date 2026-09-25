@@ -46,12 +46,12 @@ import json
 import os
 
 ### Set Cache Parameters
-DATASET = DATASETS["CICAPT-IIoT"]
-PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_CICAPT_d128/"
-                  "PacketLevelAutoEncoder_PacketAE_CICAPT_d128_best.ckpt")
+DATASET = DATASETS["IIoTset-Ferrag"]
+PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_IIoTset_d128/"
+                  "PacketLevelAutoEncoder_PacketAE_IIoTset_d128_best.ckpt")
 # Names the cache directory: flow_split/latents_<TAG>/<split>. Change it whenever
 # PACKET_AE_CKPT changes, so two generations of cache never share a path.
-CACHE_TAG = "PacketAE_CICAPT_d128_best"
+CACHE_TAG = "PacketAE_IIoTset_d128_best"
 # The two splits the sequence level trains on. The four anomaly-detection splits
 # (ad_fit, ad_calib, val, late) are deliberately absent: nothing that trains should
 # have a cache, and SequenceEmbeddingAD reaches them through its token path instead.

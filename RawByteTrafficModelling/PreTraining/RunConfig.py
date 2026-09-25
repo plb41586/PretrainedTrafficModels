@@ -27,6 +27,7 @@ import logging
 import math
 import csv
 import os
+from pathlib import Path
 
 # --- Token / packet conventions --------------------------------------------
 # Defined once here rather than ad hoc per script: CachePacketLatents and the
@@ -44,6 +45,12 @@ TRAINING_OUTPUT_ROOT = "RawByteTrafficModelling/PreTraining/TrainingOutputs"
 # --- Data artefacts ---------------------------------------------------------
 DATA_ROOT = "data_artefacts/merged_extractor"
 
+# The one split layout, in time order, one consumer per split (docs/components/
+# 02-temporal-split.md § Split roles): train pretrains the AEs, test picks their
+# checkpoint, ad_fit fits the detectors, ad_calib turns scores into thresholds, val is
+# the reported false-positive rate, late is the drift floor.
+SIX_ROLE_SPLITS = ("train", "test", "ad_fit", "ad_calib", "val", "late")
+
 
 @dataclass(frozen=True)
 class DatasetPaths:
@@ -58,10 +65,8 @@ class DatasetPaths:
     Do not assume a flow lives in exactly one split -- an earlier version of
     this docstring claimed that, and it is false by design (see docs/components/02-temporal-split.md).
 
-    Captures differ in which splits they have: the IIoTset tree predates the
-    six-role layout and carries only train/test/val. `splits` is the authority,
-    and `split()` validates against it, so a name that does not exist fails
-    here rather than as an unreadable-parquet error later.
+    `splits` is the authority, and `split()` validates against it, so a name that
+    does not exist fails here rather than as an unreadable-parquet error later.
 
     Args:
         name:        directory under DATA_ROOT.
@@ -73,7 +78,7 @@ class DatasetPaths:
     """
     name: str
     source: str = "NormalMerged.parquet"
-    splits: tuple[str, ...] = ("train", "test", "val")
+    splits: tuple[str, ...] = SIX_ROLE_SPLITS
     has_attacks: bool = True
 
     @property
@@ -88,6 +93,26 @@ class DatasetPaths:
     @property
     def attacks(self) -> str | None:
         return f"{self.root}/attacks" if self.has_attacks else None
+
+    def attack_names(self) -> tuple[str, ...]:
+        """Sorted stems of `attacks/*.parquet`; the stem is the attack class. Empty when
+        the capture has no attacks, so a role mapped to ALL_ATTACKS resolves to nothing
+        instead of listing a directory that does not exist."""
+        if not self.has_attacks:
+            return ()
+        return tuple(sorted(p.stem for p in Path(self.attacks).glob("*.parquet")))
+
+    def attack(self, name: str) -> str:
+        """Path to one attack parquet, checked against `attack_names()`."""
+        if name not in self.attack_names():
+            raise KeyError(f"{self.name} has no attack capture {name!r}; "
+                           f"it has {self.attack_names()}")
+        return f"{self.attacks}/{name}.parquet"
+
+    def sections(self) -> dict[str, str]:
+        """Every readable section of this capture -> its kind, for `DataRoles`."""
+        return ({s: NORMAL for s in self.splits}
+                | {a: ATTACK for a in self.attack_names()})
 
     def split(self, which: str) -> str:
         """Path to one split parquet, checked against `splits`."""
@@ -124,20 +149,91 @@ class DatasetPaths:
 
 
 DATASETS = {
-    # Cut by the pre-2026-09 flow-selection splitter into three splits. Its splits each
-    # span the whole capture (see the note in EmbeddingADSuite), so they are held-out
-    # populations rather than held-out periods.
     "IIoTset-Ferrag": DatasetPaths("IIoTset-Ferrag"),
-    # Strict temporal split, six roles, one per consumer: train pretrains the AEs, test
-    # picks their checkpoint, ad_fit fits the detectors, ad_calib turns scores into
-    # thresholds, val is the reported false-positive rate, late is the drift floor.
     "CICAPT-IIoT": DatasetPaths(
         "CICAPT-IIoT",
         source="CICAPT_Phase1.parquet",
-        splits=("train", "test", "ad_fit", "ad_calib", "val", "late"),
         has_attacks=False,
     ),
 }
+
+
+# --- Data roles -------------------------------------------------------------
+# Section kinds. A section is anything a script can read as one unit: a split of the
+# normal capture, or one attack capture (stem = attack class).
+NORMAL = "normal"
+ATTACK = "attack"
+# Expands to every attack section available, so a role can take all attacks without
+# listing them (the list differs per capture and is empty for CICAPT).
+ALL_ATTACKS = "<all attacks>"
+
+
+class DataRoles:
+    """The one place a script says which data it reads, and a log of every read.
+
+    A script declares `DATA_ROLES = {script_role: (section, ...)}` near its top. This
+    class checks the sections against what actually exists (`available`: section ->
+    NORMAL | ATTACK), logs the resolved mapping once as a `DATA ROLES` block (including
+    which available sections are left unread), and then logs one `DATA ACCESS` line per
+    `touch()` -- which the scripts call at every disk read of a section. The run log is
+    then a complete record of what data a run saw.
+
+    Roles are disjoint: a section mapped to two roles raises, unless that exact pair of
+    roles is listed in `allow_shared` (the embedding export reads `test` both as a cached
+    set and for its cross-path check).
+    """
+
+    def __init__(self, role_map: dict[str, tuple[str, ...]], available: dict[str, str],
+                 logger: logging.Logger,
+                 allow_shared: tuple[tuple[str, str], ...] = ()):
+        self.available = dict(available)
+        self.logger = logger
+        self.roles: dict[str, tuple[str, ...]] = {}
+        for role, sections in role_map.items():
+            if isinstance(sections, str):
+                raise TypeError(f"role {role!r} maps to the string {sections!r}; "
+                                f"use a tuple, e.g. ({sections!r},)")
+            resolved = []
+            for s in sections:
+                if s == ALL_ATTACKS:
+                    resolved += [a for a, kind in self.available.items() if kind == ATTACK]
+                elif s not in self.available:
+                    raise KeyError(f"role {role!r} maps to unknown section {s!r}; "
+                                   f"available: {sorted(self.available)}")
+                else:
+                    resolved.append(s)
+            self.roles[role] = tuple(dict.fromkeys(resolved))   # dedupe, keep order
+
+        shared = {frozenset(p) for p in allow_shared}
+        names = list(self.roles)
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                both = set(self.roles[a]) & set(self.roles[b])
+                if both and frozenset((a, b)) not in shared:
+                    raise ValueError(f"roles {a!r} and {b!r} both map {sorted(both)}; "
+                                     f"roles must not share a section")
+
+        width = max(len(r) for r in self.roles) if self.roles else 0
+        lines = [f"  {r:<{width}} -> {', '.join(s) if s else '(none)'}"
+                 for r, s in self.roles.items()]
+        mapped = {s for secs in self.roles.values() for s in secs}
+        unread = [s for s in self.available if s not in mapped]
+        lines.append(f"  not read this run: {', '.join(unread) if unread else '(none)'}")
+        self.logger.info("DATA ROLES\n" + "\n".join(lines))
+
+    def sections(self, role: str) -> tuple[str, ...]:
+        return self.roles[role]
+
+    def kind(self, section: str) -> str:
+        return self.available[section]
+
+    def touch(self, role: str, section: str, path: str, rows: int | None = None):
+        """Log one read of `section` in `role`. Call it at the read, not ahead of it."""
+        if section not in self.roles.get(role, ()):
+            raise KeyError(f"reading section {section!r} as role {role!r}, which the "
+                           f"DATA_ROLES map does not allow")
+        rows_part = f" rows={rows}" if rows is not None else ""
+        self.logger.info(f"DATA ACCESS role={role} section={section}{rows_part} path={path}")
 
 
 # --- Run scaffolding --------------------------------------------------------

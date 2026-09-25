@@ -42,14 +42,9 @@ Blocks running the pipeline end to end on a second capture. The details are in t
 linked docs, so they are not repeated here. Mechanism changes (role mapping, how to handle
 oversize frames, re-splitting) need to be agreed with the user before implementing.
 
-- [ ] **The export fails for a capture without `attacks/`.** `SequenceEmbeddingAD.py`
-      calls `os.listdir(None)` → `docs/components/06-flow-embedding-export.md § Known gaps`.
-- [ ] **The export does not cover the six-role splits.** `TOKEN_SETS` lists only `val`, so
-      `ad_fit` / `ad_calib` / `late` are never exported → same section.
-- [ ] **`EmbeddingADSuite.py` still uses `train` / `test` / `val` for its roles** instead of
-      `ad_fit` / `ad_calib` / `val` → `docs/components/07-anomaly-detection.md § Known gaps`.
-- [ ] **IIoTset-Ferrag was split by the old flow-selection splitter.** Re-splitting it
-      means regenerating its caches and retraining every model on it →
+- [ ] **Retrain IIoTset-Ferrag on the six-role split, then delete `archive/`.** Split →
+      packet AE → cache + check → sequence AE (→ structure fine-tune) → export → AD, with a SMOKE
+      run first each time. `rm -rf archive/` only after the new results are confirmed →
       `docs/components/02-temporal-split.md § Current state`.
 - [ ] **`ID_Encoder` raises on frames of 1520 bytes or more** (jumbo frames, TSO/GRO captures)
       → `docs/reference/data-representation.md § Constants`.

@@ -102,12 +102,12 @@ DEVICE_INDEX = 1               # leaves cuda:0 free for a concurrent lambda swee
 
 ### Data -- must match stage 1 and CachePacketLatents
 DATASET = DATASETS["IIoTset-Ferrag"]
-CACHE_TAG = "PacketAE_d128_best"
+CACHE_TAG = "PacketAE_IIoTset_d128_best"
 PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_IIoTset_d128/"
                   "PacketLevelAutoEncoder_PacketAE_IIoTset_d128_best.ckpt")
 TRAIN_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "train")
 TEST_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "test")
-VAL_SPLIT_FILE = DATASET.test  # byte eval needs the raw packets the test cache was built from
+TEST_SPLIT_FILE = DATASET.test  # byte eval needs the raw packets the test cache was built from
 
 PACKETS_PER_SEQUENCE = 65      # P, including the slot the seq-CLS overwrites
 
@@ -231,7 +231,7 @@ logger.info(f"Trainable parameters: {sum(p.numel() for p in trainable)} "
 # --- Byte-level reconstruction eval -----------------------------------------
 byte_eval = build_byte_eval_set(
     handler=ValHandler, flow_offsets=val_flow_offsets, windows=val_windows[:, 1:],
-    meta=val_meta, split_file=VAL_SPLIT_FILE, packet_ae_params=packet_ae_params,
+    meta=val_meta, split_file=TEST_SPLIT_FILE, packet_ae_params=packet_ae_params,
     packet_encoder=model.encoder.packet_encoder, packet_decoder=packet_decoder,
     num_windows=BYTE_EVAL_WINDOWS, chunk=BYTE_EVAL_CHUNK, device=device, logger=logger)
 byte_ceiling = byte_eval["ceiling"]
@@ -577,5 +577,4 @@ plot_curves(
 
 logger.info(f"Done. Export embeddings with SequenceEmbeddingAD.py by setting its "
             f"RUN_NAME to {RUN_NAME!r}, then compare against {STAGE1_RUN} in "
-            f"EmbeddingADSuite.py with CALIB_LABEL = EVAL_NEG_LABEL = 'test' -- `val` "
-            f"was already spent on the stage-1 model.")
+            f"EmbeddingADSuite.py with the same DATA_ROLES map for both runs.")

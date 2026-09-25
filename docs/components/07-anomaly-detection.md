@@ -7,17 +7,19 @@ normals against the attack captures.
 **Entry point:** `RawByteTrafficModelling/AnomalyDetection/EmbeddingADSuite.py`.
 The reusable parts are in the `AnomalyDetection/EmbeddingAD/` package.
 
-**Consumes:** an embedding directory from stage 6 (`EMBEDDING_DIR`).
-**Produces:** `Outputs/AD/<RUN_NAME>_eval-<EVAL_NEG_LABEL>/`
+**Consumes:** the sets named in `DATA_ROLES`, from an embedding directory written by stage 6 (`EMBEDDING_DIR`).
+**Produces:** `Outputs/AD/<RUN_NAME>_eval-<eval_neg sections>/`
 ([artefacts § AD outputs](../reference/artefacts.md#ad-outputs-stage-7)).
 
 ## Where the logic lives
 
 | Concern | File · symbol (under `AnomalyDetection/`) |
 |---|---|
-| Driver: role assignment, fit/score, metrics, figures | `EmbeddingADSuite.py` · `select_detectors`, `fit_and_score` |
-| Load and check alignment | `EmbeddingAD/data.py` · `load_embedding_dir` |
-| Role masks (disjoint, non-empty; halves one set if it has two roles) | `EmbeddingAD/data.py` · `split_roles` |
+| Driver: role map, fit/score, metrics, drift table, figures | `EmbeddingADSuite.py` · `DATA_ROLES`, `select_detectors`, `fit_and_score` |
+| Role map validation and access log | `PreTraining/RunConfig.py` · `DataRoles` ([conventions § Data roles](../reference/conventions.md#data-roles)) |
+| Which sets the directory holds | `EmbeddingAD/data.py` · `embedding_sections` |
+| Load only the mapped sets, and check alignment | `EmbeddingAD/data.py` · `load_embedding_dir` |
+| Role masks (disjoint; required roles non-empty) | `EmbeddingAD/data.py` · `split_roles` |
 | Preprocessing, fitted on the fit set only | `EmbeddingAD/data.py` · `Preprocessor` (`l2_standardize` / `standardize` / `raw`, optional PCA) |
 | Detector interface and registry | `EmbeddingAD/detectors.py` · `Detector`, `DETECTORS`, `SLOW_DETECTORS` |
 | Thresholds and metrics | `EmbeddingAD/evaluation.py` · `calibrate`, `evaluate`, `bin_masks`, `agreement_matrix`, `pivot`, `pivot_bins` |
@@ -25,10 +27,11 @@ The reusable parts are in the `AnomalyDetection/EmbeddingAD/` package.
 
 ## How it works
 
-1. **Assign roles.** Each exported label gets one role: `FIT_LABEL` → `fit`,
-   `CALIB_LABEL` → `calib`, `EVAL_NEG_LABEL` → `eval_neg`, and `set == "attack"` →
-   `eval_pos`. Rows with no role are dropped before anything is scored or plotted, so
-   an unused held-out split cannot show up in the figures either.
+1. **Assign roles.** `DATA_ROLES` maps each role to exported sets. By default `fit` →
+   `ad_fit`, `calib` → `ad_calib`, `eval_neg` → `val`, `eval_pos` → every attack set, and
+   `drift` → `late`. No set may serve two roles. Only the mapped `.npy` files are read,
+   and each read is logged. An unmapped split is never loaded, so it cannot appear in
+   the scores, the figures or `scores.parquet`.
 2. **Preprocess** with parameters fitted on `fit` alone.
 3. **Fit** every detector in `DETECTORS` on `fit`, and score every row. Higher scores mean
    more anomalous.
@@ -39,6 +42,11 @@ The reusable parts are in the `AnomalyDetection/EmbeddingAD/` package.
 5. **Evaluate:** labels are used for the first time here. AUROC, AUPRC, partial AUROC
    (FPR ≤ 1%) and TPR at each calibrated threshold are computed pooled, per attack class,
    and per `seq_len` bin.
+   If `drift` is mapped, the same metrics are computed a second time with `drift` as the
+   negatives. The detectors and thresholds are unchanged. Both sets of rows go into
+   `metrics.parquet`, told apart by the `negatives` column. A drift table compares
+   pooled AUROC and realised FPR between `eval_neg` and `drift`, which shows how far
+   the operating point moves one split later in time.
 6. **Report:** heatmaps, ROC/PR curves, score distributions, score vs. length,
    calibration, detector agreement, and a projection of `FOCUS_DETECTOR` where UMAP is
    fitted on normals only. Everything is combined into `report.html`.
@@ -68,7 +76,7 @@ detector from the same labelled rows it is then reported on would bias the resul
 
 ## Configuration
 
-`RUN_NAME`/`EMBEDDING_DIR`, the three `*_LABEL` roles, `FOCUS_DETECTOR`, `PREPROCESS`,
+`RUN_NAME`/`EMBEDDING_DIR`, `DATA_ROLES`, `FOCUS_DETECTOR`, `PREPROCESS`,
 `PCA_COMPONENTS`, `QUANTILES`, `SEQ_LEN_BINS`, `ENABLE_SLOW`, `REFIT` (`False` reuses
 `scores.parquet` and redoes only the metrics and figures), `SMOKE`.
 
@@ -77,11 +85,8 @@ first.
 
 ## Known gaps
 
-- **The suite has not been moved to the six-role layout.** It still uses `train` / `test` /
-  `val` for fit / calib / eval_neg. The six-role layout
-  ([02 § Split roles](02-temporal-split.md#split-roles)) is designed for `ad_fit` /
-  `ad_calib` / `val`, which needs those splits exported first
-  ([06 § Known gaps](06-flow-embedding-export.md#known-gaps)).
+- **CICAPT-IIoT cannot be evaluated.** It has no attack captures, so `eval_pos` selects
+  nothing and `split_roles` raises.
 
 ## Extending
 
@@ -95,8 +100,6 @@ first.
 
 | Script | Status |
 |---|---|
-| `embedding_viz.py` | UMAP fitted on `test` normals alone, with attacks transformed into it. Three views (overview, one panel per attack, coloured by `seq_len`). Read the length view before trusting the overview |
+| `embedding_viz.py` | UMAP fitted on the `reference` split alone (`test`), with attacks transformed into it. It reads only its `DATA_ROLES`. Three views (overview, one panel per attack, coloured by `seq_len`). Read the length view before trusting the overview |
 | `Embedding_Viz.ipynb` | exploratory only. It fits the scaler and UMAP on normals and attacks together, so its separation is not evidence |
-| `AutoEncoderAD.py` | legacy packet-level AD by reconstruction loss |
-| `EncoderEmbeddingAD.py` | legacy export of packet-level embeddings |
 | `VisualizeDistribution.py` | generic interactive histogram viewer for a directory of `.npy` files |

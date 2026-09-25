@@ -45,7 +45,7 @@ Python paths in the table are relative to `RawByteTrafficModelling/`.
 This is the full list of places to touch when a new capture goes through the pipeline.
 Each script is configured through constants at the top of the file (see
 [conventions](reference/conventions.md#script-anatomy)). The `Known gaps` sections of the
-component docs list what does not work yet for a capture that differs from IIoTset-Ferrag.
+component docs list what does not work yet for a new capture.
 
 1. **Extract** every pcap (the normal capture and each attack capture) to parquet
    → [01](components/01-feature-extraction.md). Check the `parse errors` count in the log.
@@ -66,11 +66,13 @@ component docs list what does not work yet for a capture that differs from IIoTs
 7. *(optional)* **Structure fine-tune**: profile the groups with `InspectFlowGroups.py`
    first, because the choice of grouping key depends on the capture
    → [05](components/05-sequence-pretraining.md#stage-2-structure-fine-tune).
-8. **Export** embeddings: set `RUN_NAME`, `DATASET`, `CACHE_TAG`, `TOKEN_SETS`
+8. **Export** embeddings: set `RUN_NAME`, `DATASET`, `CACHE_TAG` and check `DATA_ROLES`
    → [06](components/06-flow-embedding-export.md).
-9. **Detect**: set `RUN_NAME` and the three role labels, then do a `SMOKE` run before the real
+9. **Detect**: set `RUN_NAME` and check `DATA_ROLES`, then do a `SMOKE` run before the real
    run, because the real run spends the evaluation split
-   → [07](components/07-anomaly-detection.md).
+   → [07](components/07-anomaly-detection.md). The `DATA ROLES` / `DATA ACCESS` lines in
+   each run log record exactly which data was read
+   ([conventions § Data roles](reference/conventions.md#data-roles)).
 
 Keep one artefact lineage per capture. A re-extracted parquet invalidates its split and
 every cache and checkpoint built downstream of it

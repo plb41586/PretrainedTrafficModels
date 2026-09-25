@@ -6,9 +6,8 @@ whose row i describes row i of the `.npy` files stacked in `sorted(glob("*.npy")
 is the same order). Every number this suite produces rests on that alignment, so
 `load_embedding_dir` checks it run-length by run-length rather than trusting it.
 
-Split roles follow the project's naming: `train` is fitted on, `test` was monitored during
-training and is therefore already spent (it is where thresholds get calibrated), and `val`
-is the final held-out set used as the evaluation negatives.
+Which exported sets play which role is the caller's DATA_ROLES map (RunConfig.DataRoles);
+only the sets it names are read from disk.
 """
 from pathlib import Path
 import logging
@@ -18,37 +17,54 @@ import polars as pl
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
+from RawByteTrafficModelling.PreTraining.RunConfig import ATTACK, NORMAL, DataRoles
+
 logger = logging.getLogger(__name__)
 
+ATTACK_SET = "attack"   # the `set` column value SequenceEmbeddingAD writes for attack rows
 
-def load_embedding_dir(data_dir: str) -> tuple[np.ndarray, pl.DataFrame]:
-    """Stacked (N, D) embeddings plus the row-aligned metadata frame.
+
+def embedding_sections(data_dir: str) -> dict[str, str]:
+    """Every exported set in an embedding directory -> NORMAL | ATTACK, for `DataRoles`.
+
+    Reads only the `set`/`label` columns of `metadata.parquet` -- the index of what the
+    directory holds -- not any embedding.
+    """
+    pairs = (pl.read_parquet(Path(data_dir) / "metadata.parquet", columns=["set", "label"])
+             .unique(maintain_order=True))
+    return {label: ATTACK if s == ATTACK_SET else NORMAL
+            for s, label in pairs.iter_rows()}
+
+
+def load_embedding_dir(data_dir: str, roles: DataRoles) -> tuple[np.ndarray, pl.DataFrame]:
+    """Stacked (N, D) embeddings plus the row-aligned metadata frame, for the mapped sets only.
+
+    Only the `.npy` of a set that some role maps is opened, and each open is logged through
+    `roles.touch`; the metadata is filtered to the same sets (order kept). An unmapped
+    split is therefore never read, rather than read and dropped.
 
     Labels come from `metadata.parquet`, never re-derived from the filenames -- but the
     file order is used to *verify* the metadata, since a mismatch would silently attribute
     attack rows to normal splits and quietly invert every result.
-
-    Only files whose stem is a label in metadata.parquet are read. Downstream tools write
-    their own .npy artefacts into this directory (embedding_viz caches umap_coords.npy),
-    and those must not be stacked in as if they were an exported set.
     """
     data_dir = Path(data_dir)
-    known = set(pl.read_parquet(data_dir / "metadata.parquet")["label"].unique().to_list())
-    files = [f for f in sorted(data_dir.glob("*.npy")) if f.stem in known]
-    if not files:
-        raise FileNotFoundError(f"no .npy files in {data_dir} matching a metadata label")
-    skipped = sorted(f.stem for f in data_dir.glob("*.npy") if f.stem not in known)
-    if skipped:
-        logger.info(f"Ignoring non-embedding .npy in {data_dir}: {skipped}")
+    wanted = {s: role for role, secs in roles.roles.items() for s in secs}
+    # Same order SequenceEmbeddingAD writes the metadata in: sorted by file name.
+    files = [data_dir / f"{label}.npy" for label in sorted(wanted, key=lambda n: f"{n}.npy")]
+    missing = [f.name for f in files if not f.exists()]
+    if missing:
+        raise FileNotFoundError(f"DATA_ROLES maps sets with no file in {data_dir}: {missing}")
 
     parts, expected = [], []
     for f in files:
         arr = np.load(f)
+        roles.touch(wanted[f.stem], f.stem, str(f), rows=arr.shape[0])
         parts.append(arr.astype(np.float32, copy=False))
         expected.append((f.stem, arr.shape[0]))
     X = np.vstack(parts)
 
-    meta = pl.read_parquet(data_dir / "metadata.parquet")
+    meta = (pl.read_parquet(data_dir / "metadata.parquet")
+            .filter(pl.col("label").is_in(list(wanted))))
     if meta.height != X.shape[0]:
         raise ValueError(f"metadata has {meta.height} rows but the .npy files stack to "
                          f"{X.shape[0]} -- the export and the metadata are out of sync")
@@ -93,44 +109,28 @@ def take_rows(df: pl.DataFrame, idx: np.ndarray) -> pl.DataFrame:
     return df.filter(pl.Series(mask))
 
 
-def split_roles(meta: pl.DataFrame, fit_label: str, calib_label: str,
-                eval_neg_label: str, attack_set: str = "attack",
-                calib_frac: float = 0.5, seed: int = 0) -> dict[str, np.ndarray]:
-    """Boolean row masks for the four roles, checked to be non-empty and disjoint.
+def split_roles(meta: pl.DataFrame, roles: DataRoles,
+                required: tuple[str, ...] = ("fit", "calib", "eval_neg", "eval_pos"),
+                ) -> dict[str, np.ndarray]:
+    """Boolean row masks, one per role in the map, checked to be disjoint.
 
-    If calib_label == eval_neg_label, that one set plays both roles and is split
-    deterministically into two disjoint halves (calib_frac to calibration). That is
-    what keeps thresholds from being calibrated on the very rows they are then
-    evaluated against, and it is how the final held-out split stays unspent while
-    still getting an honest false-positive rate.
+    Every `required` role must select rows; any other role (e.g. `drift`) may be mapped
+    to nothing, and is then absent from the result. A section serves exactly one role --
+    there is no splitting of one set into two roles.
     """
-    label = meta["label"].to_numpy()
-    set_col = meta["set"].to_numpy()
-    masks = {
-        "fit": label == fit_label,
-        "calib": label == calib_label,
-        "eval_neg": label == eval_neg_label,
-        "eval_pos": set_col == attack_set,
-    }
-
-    if calib_label == eval_neg_label:
-        idx = np.where(label == calib_label)[0]
-        shuffled = np.random.default_rng(seed).permutation(idx)
-        n_calib = int(round(calib_frac * idx.size))
-        calib_mask = np.zeros_like(masks["calib"])
-        eval_mask = np.zeros_like(masks["eval_neg"])
-        calib_mask[shuffled[:n_calib]] = True
-        eval_mask[shuffled[n_calib:]] = True
-        masks["calib"], masks["eval_neg"] = calib_mask, eval_mask
-        logger.info(f"'{calib_label}' plays both calib and eval_neg: split "
-                    f"{n_calib}/{idx.size - n_calib} (disjoint, seed {seed})")
-    for name, m in masks.items():
+    label = meta["label"]
+    masks = {}
+    for role, sections in roles.roles.items():
+        m = label.is_in(list(sections)).to_numpy()
         if not m.any():
-            raise ValueError(f"role '{name}' selects no rows -- check the *_LABEL config "
-                             f"against the exported labels {sorted(set(label))}")
+            if role in required:
+                raise ValueError(f"role '{role}' selects no rows -- check DATA_ROLES "
+                                 f"against the exported labels {sorted(set(label.to_list()))}")
+            continue
+        masks[role] = m
     stacked = np.stack(list(masks.values()))
     if (stacked.sum(axis=0) > 1).any():
-        raise ValueError("the four role masks overlap; a row cannot be both fitted on and "
+        raise ValueError("role masks overlap; a row cannot be both fitted on and "
                          "evaluated against")
     logger.info("Roles: " + ", ".join(f"{n}={int(m.sum())}" for n, m in masks.items()))
     return masks
@@ -141,8 +141,8 @@ class Preprocessor:
 
     `l2_standardize` reproduces what Embedding_Viz.ipynb does to the embeddings before UMAP
     (L2-normalise, then standardise), so the detectors see the same geometry the promising
-    UMAP picture came from -- the difference is that here the statistics come from `train`
-    alone instead of the pooled normals+attacks.
+    UMAP picture came from -- the difference is that here the statistics come from the fit
+    role alone instead of the pooled normals+attacks.
     """
 
     MODES = ("l2_standardize", "standardize", "raw")

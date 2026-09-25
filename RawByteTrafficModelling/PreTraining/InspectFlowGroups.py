@@ -39,7 +39,7 @@ import numpy as np
 import os
 
 DATASET = DATASETS["IIoTset-Ferrag"]
-CACHE_TAG = "PacketAE_d128_best"        # must match CachePacketLatents
+CACHE_TAG = "PacketAE_IIoTset_d128_best"        # must match CachePacketLatents
 SPLITS = ("train", "test")
 SPLIT_FILES = {"train": DATASET.train, "test": DATASET.test}
 SEQ_LEN = 64                            # PACKETS_PER_SEQUENCE - 1, real packets per window

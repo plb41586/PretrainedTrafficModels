@@ -13,8 +13,8 @@ Run from the repo root:
 Reads the temporal flow_split: each split is a contiguous wall-clock interval and
 a flow crossing a boundary is cut there, so the same flow_key can appear in
 several splits (see docs/components/02-temporal-split.md). The sequence level
-reuses the same partition. val.parquet is deliberately untouched -- it is the
-final held-out set.
+reuses the same partition. Only train and test are read: the four AD splits
+(ad_fit, ad_calib, val, late) are deliberately untouched.
 """
 from RawByteTrafficModelling.ModelComponents.ModelDefinitions import (
     AutoEncoderParams,
@@ -44,15 +44,16 @@ import torch.nn.functional as F
 import math
 
 ### Set Training Parameters
-RUN_NAME = "PacketAE_CICAPT_d128"
-DATASET = DATASETS["CICAPT-IIoT"]
+RUN_NAME = "PacketAE_IIoTset_d128"
+DATASET = DATASETS["IIoTset-Ferrag"]
 DEVICE_INDEX = 0               # AE on cuda:0, the MLM run takes cuda:1 concurrently
 
 ENCODER_DIM = 128              # was 64; the old run's non-pad accuracy plateaued at ~0.554
 ENCODER_LAYERS = 2             # unchanged, so width is the only variable vs. that run
 DECODER_LAYERS = 2
 
-# Measured ~2.0 s/step at bs=512 -> ~7.5 h per 13.3k-step epoch on one A5000.
+# Measured ~2.0 s/step at bs=512 on one A5000. IIoTset six-role train is 5.36M packets
+# -> ~10.5k steps (~5.8 h) per epoch.
 # The cosine schedule spans the whole run, so changing this changes the LR curve
 # rather than just truncating it.
 Epochs = 2
@@ -70,8 +71,8 @@ AMP_DTYPE = torch.bfloat16     # None disables autocast
 # with _deprecated/EdgeIIoT_AutoEncoder_FlowSplit (test CE 0.13794, non-pad 0.554).
 PAD_LOSS_WEIGHT = 0.1
 
-# One train epoch is ~6.8M packets (~13.3k batches at bs=512), so per-batch logging
-# and a full pass over the 1.46M-packet test split are both far too expensive.
+# One train epoch is ~5.4M packets (~10.5k batches at bs=512), so per-batch logging
+# and a full pass over the ~0.97M-packet test split are both far too expensive.
 # Log running averages on an interval, and evaluate on a fixed random subset of
 # test drawn once so the number is comparable across evals.
 log_every_n_batches = 200

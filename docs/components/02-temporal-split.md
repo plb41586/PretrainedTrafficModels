@@ -67,10 +67,13 @@ but they must also be listed in the capture's `DatasetPaths.splits`.
 
 ## Current state
 
-| Capture | Layout | Produced by |
-|---|---|---|
-| `CICAPT-IIoT` | six roles, strict temporal | the current `split_flows` |
-| `IIoTset-Ferrag` | `train`/`test`/`val` | the **earlier flow-selection splitter**, so each split spans the whole capture: it holds out a population of flows, not a period of time. Re-splitting it with the current splitter would invalidate its latent cache and every model trained on it |
+Every capture uses the six-role layout, which is the `DatasetPaths.splits` default
+(`RunConfig.SIX_ROLE_SPLITS`).
+
+| Capture | Produced by |
+|---|---|
+| `CICAPT-IIoT` | the current `split_flows` |
+| `IIoTset-Ferrag` | **re-split pending.** It is being re-cut with the current `split_flows`, using the same fractions as CICAPT. Its old three-split, flow-selection split, and everything trained on that split, are in `archive/` until the retrain is done ([artefacts § Directory layout](../reference/artefacts.md#directory-layout)) |
 
 ## Scope
 

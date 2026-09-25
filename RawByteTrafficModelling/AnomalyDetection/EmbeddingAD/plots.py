@@ -6,8 +6,11 @@ from the CDN -- the same pattern VisualizeDistribution.py already uses).
 
 The projection is the point of the exercise: Embedding_Viz.ipynb fits both the scaler and
 UMAP on the pooled normals *and* attacks, so the separation it shows is partly the
-projection having been told where the attacks are. Here UMAP is fitted on the `train`
+projection having been told where the attacks are. Here UMAP is fitted on the fit-role
 normals and everything else is `transform`-ed into that fixed layout.
+
+Titles and legends name the actual sections of each role, set once per run through
+`set_role_sections`, so a figure never claims a split the run did not use.
 """
 import base64
 import logging
@@ -29,10 +32,30 @@ ROLE_STYLE = {                 # (colour, draw order) for the score-distribution
     "fit": ("#4C78A8", 0),
     "calib": ("#72B7B2", 1),
     "eval_neg": ("#54A24B", 2),
-    "eval_pos": ("#E45756", 3),
+    "drift": ("#B279A2", 3),
+    "eval_pos": ("#E45756", 4),
 }
-ROLE_LABEL = {"fit": "train (fit)", "calib": "test (calibrate)",
-              "eval_neg": "val (eval normal)", "eval_pos": "attacks"}
+ROLE_PURPOSE = {"fit": "fit", "calib": "calibrate", "eval_neg": "eval normal",
+                "drift": "drift", "eval_pos": "attacks"}
+ROLE_SECTIONS: dict[str, str] = {}    # role -> "a+b" section names, see set_role_sections
+
+
+def set_role_sections(roles: dict[str, tuple[str, ...]]):
+    """Record which sections each role holds, for titles and legends."""
+    ROLE_SECTIONS.clear()
+    for role, sections in roles.items():
+        # Attack roles can hold dozens of captures; the purpose says enough there.
+        ROLE_SECTIONS[role] = ("attacks" if role == "eval_pos"
+                               else "+".join(sections) or "(none)")
+
+
+def _sec(role: str) -> str:
+    return ROLE_SECTIONS.get(role, role)
+
+
+def _role_label(role: str) -> str:
+    return (_sec(role) if role == "eval_pos"
+            else f"{_sec(role)} ({ROLE_PURPOSE.get(role, role)})")
 
 
 def _grid(n: int, width: float = 4.2, height: float = 3.2, cols: int = 3):
@@ -75,8 +98,10 @@ def plot_score_distributions(scores, masks, metrics, quantiles, out_path):
         lo, hi = np.percentile(finite, [0.2, 99.8])
         bins = np.linspace(lo, hi, 80) if hi > lo else 80
         for role, (colour, _) in sorted(ROLE_STYLE.items(), key=lambda kv: kv[1][1]):
+            if role not in masks:
+                continue
             ax.hist(np.clip(s[masks[role]], lo, hi), bins=bins, density=True, alpha=0.45,
-                    color=colour, label=ROLE_LABEL[role])
+                    color=colour, label=_role_label(role))
         for q in quantiles:
             thr = metrics.filter((pl.col("detector") == det) & (pl.col("bin") == ev.ALL_BIN)
                                  & (pl.col("metric") == f"threshold@q{q}"))["value"]
@@ -89,7 +114,8 @@ def plot_score_distributions(scores, masks, metrics, quantiles, out_path):
     for ax in axes[len(scores):]:
         ax.axis("off")
     axes[0].legend(fontsize=7)
-    fig.suptitle("Score distributions by split role (thresholds calibrated on test normals)")
+    fig.suptitle(f"Score distributions by split role "
+                 f"(thresholds calibrated on {_sec('calib')} normals)")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -111,7 +137,7 @@ def plot_roc_pr(scores, masks, out_path):
         prec, rec, _ = precision_recall_curve(y, sc)
         ax_pr.plot(rec, prec, lw=1.2, label=det)
     ax_roc.set_xscale("log")
-    ax_roc.set_xlabel("FPR (val normals, log)")
+    ax_roc.set_xlabel(f"FPR ({_sec('eval_neg')} normals, log)")
     ax_roc.set_ylabel("TPR (attacks)")
     ax_roc.set_title("ROC, all attacks pooled")
     ax_roc.axvline(0.01, color="grey", lw=0.8, ls=":")
@@ -133,7 +159,7 @@ def plot_attack_heatmaps(metrics, tpr_metric, out_path):
     does not beat it, the detection is flow length, not the embedding.
     """
     fig, axes = plt.subplots(2, 1, figsize=(1.0 * 16 + 2, 9))
-    for ax, metric, title in [(axes[0], "auroc", "AUROC per attack (vs val normals)"),
+    for ax, metric, title in [(axes[0], "auroc", f"AUROC per attack (vs {_sec('eval_neg')} normals)"),
                               (axes[1], tpr_metric, f"{tpr_metric} per attack")]:
         values, rows, cols = _wide_to_array(ev.pivot(metrics, metric))
         im = _heatmap(ax, values, rows, cols, title, vmin=0.0, vmax=1.0)
@@ -217,7 +243,8 @@ def plot_score_vs_seqlen(scores, meta, masks, bins, out_path):
         ax.set_title(det, fontsize=10)
     for ax in axes[len(scores):]:
         ax.axis("off")
-    fig.suptitle("Score vs seq_len bin -- left box val normals, right box attacks")
+    fig.suptitle(f"Score vs seq_len bin -- left box {_sec('eval_neg')} normals, "
+                 f"right box attacks")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -226,7 +253,7 @@ def plot_score_vs_seqlen(scores, meta, masks, bins, out_path):
 
 # --- 7. calibration ---------------------------------------------------------
 def plot_calibration(metrics, quantiles, out_path):
-    """Nominal FPR (from the test quantile) against what the val normals actually give."""
+    """Nominal FPR (from the calib quantile) against what the eval_neg normals actually give."""
     fig, ax = plt.subplots(figsize=(6, 6))
     nominal = [1 - q for q in quantiles]
     for det in metrics["detector"].unique(maintain_order=True):
@@ -239,9 +266,9 @@ def plot_calibration(metrics, quantiles, out_path):
     ax.plot(lims, lims, color="black", ls="--", lw=0.8, label="perfect calibration")
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("nominal FPR (1 - quantile of test normals)")
-    ax.set_ylabel("realised FPR on val normals")
-    ax.set_title("Threshold transfer test -> val")
+    ax.set_xlabel(f"nominal FPR (1 - quantile of {_sec('calib')} normals)")
+    ax.set_ylabel(f"realised FPR on {_sec('eval_neg')} normals")
+    ax.set_title(f"Threshold transfer {_sec('calib')} -> {_sec('eval_neg')}")
     ax.legend(fontsize=7)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -254,7 +281,7 @@ def plot_projection(X, meta, masks, score, score_name, out_html, out_png,
                     n_projection=50_000, n_neighbors=100, min_dist=0.05, seed=0):
     """UMAP fitted on the fit split alone, everything else transformed into it.
 
-    A PCA-fit-on-train panel rides alongside as a deterministic cross-check: if the two
+    A PCA-fit-on-the-fit-role panel rides alongside as a deterministic cross-check: if the two
     disagree about the structure, neither is telling you much. Falls back to PCA only if
     umap-learn turns out not to be installed.
     """
@@ -264,12 +291,12 @@ def plot_projection(X, meta, masks, score, score_name, out_html, out_png,
 
     embeddings = {}
     pca = PCA(n_components=2, random_state=seed).fit(X[masks["fit"]])
-    embeddings["PCA (fit on train)"] = pca.transform(Xs)
+    embeddings[f"PCA (fit on {_sec('fit')})"] = pca.transform(Xs)
     try:
         import umap
         reducer = umap.UMAP(n_components=2, n_neighbors=n_neighbors, min_dist=min_dist,
                             metric="cosine", random_state=seed).fit(X[masks["fit"]])
-        embeddings["UMAP (fit on train)"] = reducer.transform(Xs)
+        embeddings[f"UMAP (fit on {_sec('fit')})"] = reducer.transform(Xs)
     except ImportError:
         logger.warning("umap-learn not installed -- projection falls back to PCA only")
 

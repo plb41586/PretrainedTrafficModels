@@ -2,10 +2,11 @@
 
 Two rules the whole module is built around:
 
-1. **Thresholds never see a label.** They are quantiles of the `test`-normal scores, which
-   targets a false-positive rate by construction. Whether the target actually holds is then
-   measured on the held-out `val` normals -- a large gap there means the normal manifold
-   moved between splits and the detector is not deployable however good its AUROC looks.
+1. **Thresholds never see a label.** They are quantiles of the calib-role normal scores,
+   which targets a false-positive rate by construction. Whether the target actually holds
+   is then measured on a held-out negative role (`eval_neg`, and `drift` for the later
+   tail) -- a large gap there means the normal manifold moved between splits and the
+   detector is not deployable however good its AUROC looks.
 2. **Length-matched comparison, not just pooled.** The attack exports are almost all
    single-packet windows and the normal splits almost none, so a pooled AUROC mostly
    measures flow length. Every table is therefore repeated per `seq_len` bin, with attack
@@ -61,21 +62,25 @@ def _pair_metrics(s_neg: np.ndarray, s_pos: np.ndarray,
 
 def evaluate(scores: dict[str, np.ndarray], meta: pl.DataFrame,
              masks: dict[str, np.ndarray], quantiles: tuple[float, ...],
-             bins: tuple[tuple[int, int, str], ...], min_bin_n: int = 30) -> pl.DataFrame:
-    """Long-form metric table: (detector, attack, bin, metric, value).
+             bins: tuple[tuple[int, int, str], ...], min_bin_n: int = 30,
+             neg_role: str = "eval_neg") -> pl.DataFrame:
+    """Long-form metric table: (negatives, detector, attack, bin, metric, value).
 
     `attack` is either a per-file attack label, `__pooled__` for all attacks together, or
-    `__calibration__` for the threshold and realised-FPR rows.
+    `__calibration__` for the threshold and realised-FPR rows. `neg_role` picks which
+    normal role the attacks are scored against and the realised FPR is measured on
+    (`eval_neg`, or `drift`); the thresholds always come from `calib`. The `negatives`
+    column records the choice so tables for both can share one file.
     """
     seq_len = meta["seq_len"].to_numpy()
     label = meta["label"].to_numpy()
-    neg, pos, calib = masks["eval_neg"], masks["eval_pos"], masks["calib"]
+    neg, pos, calib = masks[neg_role], masks["eval_pos"], masks["calib"]
     attacks = sorted(set(label[pos].tolist()))
     rows: list[dict] = []
 
     def emit(det, attack, bin_name, metric, value):
-        rows.append({"detector": det, "attack": attack, "bin": bin_name,
-                     "metric": metric, "value": float(value)})
+        rows.append({"negatives": neg_role, "detector": det, "attack": attack,
+                     "bin": bin_name, "metric": metric, "value": float(value)})
 
     for det, s in scores.items():
         for bin_name, bmask in bin_masks(seq_len, bins):
@@ -114,7 +119,7 @@ def evaluate(scores: dict[str, np.ndarray], meta: pl.DataFrame,
         pooled = [r for r in rows
                   if r["detector"] == det and r["attack"] == POOLED
                   and r["bin"] == ALL_BIN and r["metric"] == "auroc"]
-        logger.info(f"  {det}: pooled AUROC {pooled[0]['value']:.4f}")
+        logger.info(f"  {det}: pooled AUROC vs {neg_role} {pooled[0]['value']:.4f}")
 
     return pl.DataFrame(rows)
 

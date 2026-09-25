@@ -3,29 +3,29 @@
 Embedding_Viz.ipynb shows promising separation between normal and attack flows, but it
 cannot be used as evidence: both the StandardScaler and the UMAP reducer there are fitted
 on the pooled normals *and* attacks, so the projection was told where the attacks are.
-This script fits every transform and every detector on the `train` normals alone,
+This script fits every transform and every detector on the fit-role normals alone,
 calibrates thresholds from held-out normal scores without looking at a label, and only
-then reveals labels to compute the reported metrics against the evaluation normals
-(EVAL_NEG_LABEL) + the attack exports.
+then reveals labels to compute the reported metrics against the evaluation normals + the
+attack exports.
 
-Split roles follow the project's naming -- `train` is fitted on, `test` was monitored
-during training, `val` is the final held-out set:
+The roles, with the six-split layout they are designed for (DATA_ROLES below):
 
-    fit       train.npy   preprocessing + every detector
-    calibrate test.npy    score quantiles -> thresholds (no labels)
-    evaluate  val.npy     -> y=0
-              attacks     -> y=1
+    fit       ad_fit      preprocessing + every detector
+    calib     ad_calib    score quantiles -> thresholds (no labels)
+    eval_neg  val         -> y=0, the reported false-positive rate
+    eval_pos  attacks     -> y=1
+    drift     late        -> y=0, scored with the same detectors and thresholds and
+                             reported beside val: how far the FPR moves one split later
 
-This is the final run: `val` is spent here. It neither trained the sequence AE nor picked
-its checkpoint, so the thresholds calibrated on `test` are transferred to it rather than
-fitted on it. The splits are separated by *time*, not by flow identity -- SplitFlowsDF
-cuts long-lived conversations at a timestamp, so the same flow_key can appear either side
-of a boundary and `val` is a held-out period rather than a held-out population.
+None of these splits trained the AEs or picked their checkpoint (that is train / test).
+Every rerun spends `val` again. The splits are separated by *time*, not by flow identity
+-- SplitFlowsDF cuts long-lived conversations at a timestamp, so the same flow_key can
+appear either side of a boundary and `val` is a held-out period rather than a held-out
+population.
 
-Any set that plays no role is dropped immediately after the roles are assigned -- not
-merely excluded from the metrics. Keeping it would put it in the projection figure as its
-own labelled cluster beside the attacks, and in scores.parquet, which is a look at
-held-out data even though no metric was computed from it.
+Only the sets DATA_ROLES maps are read from disk, each read logged as a DATA ACCESS line.
+An unmapped set is never loaded -- not merely excluded from the metrics, which would
+still put it in the projection figure and in scores.parquet.
 
 Two things to read the output with. First, `seq_len_only` is in the detector list on
 purpose: most attack exports are dominated by single-packet windows (DDoS_UDP_Flood is
@@ -48,6 +48,7 @@ from RawByteTrafficModelling.AnomalyDetection.EmbeddingAD import evaluation as e
 from RawByteTrafficModelling.AnomalyDetection.EmbeddingAD import plots
 from RawByteTrafficModelling.AnomalyDetection.EmbeddingAD.data import (
     Preprocessor,
+    embedding_sections,
     load_embedding_dir,
     split_roles,
     subsample,
@@ -57,35 +58,37 @@ from RawByteTrafficModelling.AnomalyDetection.EmbeddingAD.detectors import (
     DETECTORS,
     SLOW_DETECTORS,
 )
+from RawByteTrafficModelling.PreTraining.RunConfig import ALL_ATTACKS, DataRoles
 
 ### Config
 RUN_NAME = "SeqAE_IIoTset_d128_Mamba_s512"
 EMBEDDING_DIR = f"RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_{RUN_NAME}"
 
-# Which exported set plays which role. Project naming: test is the split monitored during
-# training, val is the final held-out set.
+# Which exported sets play which role -- the only sets this run reads. Sections are the
+# labels in EMBEDDING_DIR (split names, attack stems); a role may take several. Roles must
+# not share a section. `drift` is optional: map it to () to leave `late` unread.
 #
-# The final run: thresholds are calibrated on the already-spent `test` and transferred to
-# `val`, which is spent here. Since the two are different splits, split_roles' halving
-# path no longer fires. Every rerun spends `val` again, so rerun only for a wiring
-# failure, never to improve a number.
-FIT_LABEL = "train"
-CALIB_LABEL = "test"
-EVAL_NEG_LABEL = "val"
-ATTACK_SET = "attack"          # the `set` column value SequenceEmbeddingAD writes for attacks
+# Every rerun spends `val` again, so rerun only for a wiring failure, never to improve a
+# number.
+DATA_ROLES = {
+    "fit":      ("ad_fit",),
+    "calib":    ("ad_calib",),
+    "eval_neg": ("val",),
+    "eval_pos": (ALL_ATTACKS,),
+    "drift":    ("late",),
+}
 
-# The evaluation split names the output directory, so the val run lands beside the earlier
-# test-evaluated one instead of overwriting it -- the two are directly comparable and the
-# gap between them is the cost of `test` having been monitored during training.
+# The evaluation split names the output directory, so runs evaluated against different
+# negatives land side by side instead of overwriting each other.
 output_dir = (f"RawByteTrafficModelling/AnomalyDetection/Outputs/AD/"
-              f"{RUN_NAME}_eval-{EVAL_NEG_LABEL}")
+              f"{RUN_NAME}_eval-{'+'.join(DATA_ROLES['eval_neg'])}")
 
 # The detector this run is about, pinned rather than ranked. Picking the winner from the
 # metrics below would select a detector on the same labelled rows it is then reported
-# from -- fine while eval was `test`, a selection bias on the held-out split now.
+# from -- a selection bias on the held-out split.
 FOCUS_DETECTOR = "mahalanobis"
 
-PREPROCESS = "l2_standardize"  # l2_standardize | standardize | raw -- fitted on FIT_LABEL only
+PREPROCESS = "l2_standardize"  # l2_standardize | standardize | raw -- fitted on `fit` only
 PCA_COMPONENTS = None          # e.g. 64 or 0.95; speeds up the distance-based detectors
 
 QUANTILES = (0.95, 0.99, 0.999)          # of the calibration normals -> 5% / 1% / 0.1% FPR
@@ -121,6 +124,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+roles = DataRoles(DATA_ROLES, embedding_sections(EMBEDDING_DIR), logger)
+plots.set_role_sections(roles.roles)
+
 META_COLS = ["set", "label", "flow_key", "seq_len"]
 
 
@@ -153,29 +159,17 @@ def fit_and_score(Z: np.ndarray, meta: pl.DataFrame,
 
 
 # --- Load -------------------------------------------------------------------
-X, meta = load_embedding_dir(EMBEDDING_DIR)
+X, meta = load_embedding_dir(EMBEDDING_DIR, roles)
 if N_MAX_PER_SET:
     idx = subsample(meta, N_MAX_PER_SET, SEED)
     X, meta = X[idx], take_rows(meta, idx)
     logger.info(f"Subsampled to {X.shape[0]} rows ({N_MAX_PER_SET} per set)")
 
-masks = split_roles(meta, FIT_LABEL, CALIB_LABEL, EVAL_NEG_LABEL, ATTACK_SET, seed=SEED)
-
-# Drop every row that plays no role, before anything scores or plots it.
-#
-# This is what actually keeps the final split unspent. Excluding it from the metrics is
-# not enough: the projection figure subsamples all loaded rows and draws them coloured by
-# set, so an unused split would appear as its own labelled cluster next to the attacks,
-# with a second panel colouring it by anomaly score. That is a look at held-out data, and
-# it survives into report.html and scores.parquet for anyone to read afterwards.
-in_role = masks["fit"] | masks["calib"] | masks["eval_neg"] | masks["eval_pos"]
-if not in_role.all():
-    unused = sorted(set(meta["label"].to_numpy()[~in_role].tolist()))
-    keep = np.where(in_role)[0]
-    logger.info(f"Dropping {int((~in_role).sum())} rows that play no role in this run "
-                f"(labels {unused}) -- they are not scored, plotted or written out")
-    X, meta = X[keep], take_rows(meta, keep)
-    masks = split_roles(meta, FIT_LABEL, CALIB_LABEL, EVAL_NEG_LABEL, ATTACK_SET, seed=SEED)
+masks = split_roles(meta, roles)
+# load_embedding_dir reads only mapped sets, so every row has a role. An unmapped row here
+# would reach the projection figure and scores.parquet -- a look at data the run was not
+# meant to see.
+assert np.logical_or.reduce(list(masks.values())).all(), "a loaded row plays no role"
 
 scores_path = f"{output_dir}/scores.parquet"
 
@@ -199,10 +193,19 @@ else:
     logger.info(f"Reusing cached scores for {list(scores)} from {scores_path}")
 
 # --- Metrics ----------------------------------------------------------------
-logger.info(f"Scoring against '{EVAL_NEG_LABEL}' normals "
+logger.info(f"Scoring against {roles.sections('eval_neg')} normals "
             f"(labels enter here for the first time)")
 metrics = ev.evaluate(scores, meta, masks, QUANTILES, SEQ_LEN_BINS, MIN_BIN_N)
-metrics.write_parquet(f"{output_dir}/metrics.parquet")
+all_metrics = [metrics]
+if "drift" in masks:
+    logger.info(f"Scoring the drift role {roles.sections('drift')} with the same detectors "
+                f"and thresholds")
+    drift_metrics = ev.evaluate(scores, meta, masks, QUANTILES, SEQ_LEN_BINS, MIN_BIN_N,
+                                neg_role="drift")
+    all_metrics.append(drift_metrics)
+# One file, told apart by the `negatives` column; the figures below all read `metrics`
+# (eval_neg) only.
+pl.concat(all_metrics).write_parquet(f"{output_dir}/metrics.parquet")
 
 agree = ev.agreement_matrix(scores, masks["eval_neg"] | masks["eval_pos"])
 logger.info(f"Focus detector (pinned, not picked from these metrics): {FOCUS_DETECTOR}")
@@ -221,6 +224,24 @@ logger.info("Pooled summary (all seq_len -- inflated by the length confound):\n"
 
 stratified = ev.pivot_bins(metrics, "auroc", ev.POOLED)
 logger.info("Pooled AUROC by seq_len bin (length-matched normals):\n" + str(stratified))
+
+drift_table = None
+if "drift" in masks:
+    # Same detectors, same calib thresholds, negatives one split later. A drop in AUROC or
+    # a rise in realised FPR from eval_neg to drift is how much the normal traffic moved.
+    def _neg_view(m: pl.DataFrame, tag: str) -> pl.DataFrame:
+        keep = ["auroc"] + [f"fpr_evalneg@q{q}" for q in QUANTILES]
+        return (m.filter((pl.col("bin") == ev.ALL_BIN)
+                         & (pl.col("attack").is_in([ev.POOLED, ev.CALIBRATION]))
+                         & pl.col("metric").is_in(keep))
+                .with_columns(pl.concat_str([
+                    pl.col("metric").str.replace("fpr_evalneg", "fpr", literal=True),
+                    pl.lit(f" [{tag}]")]).alias("metric"))
+                .pivot(on="metric", index="detector", values="value"))
+    drift_table = _neg_view(metrics, "+".join(roles.sections("eval_neg"))).join(
+        _neg_view(drift_metrics, "+".join(roles.sections("drift"))), on="detector")
+    logger.info("Drift: eval_neg vs drift negatives (pooled AUROC, realised FPR):\n"
+                + str(drift_table))
 
 # --- Figures ----------------------------------------------------------------
 figs = [
@@ -249,10 +270,14 @@ if not SMOKE:
     figs += [("Normals-only projection", "png", png),
              ("Normals-only projection (interactive)", "plotly", go_fig)]
 
-figs = ([("Pooled summary (length-confounded -- read the stratified table below)", "html",
-          plots.table_html(summary)),
-         ("Pooled AUROC by seq_len bin (length-matched)", "html",
-          plots.table_html(stratified))] + figs)
+tables = [("Pooled summary (length-confounded -- read the stratified table below)", "html",
+           plots.table_html(summary)),
+          ("Pooled AUROC by seq_len bin (length-matched)", "html",
+           plots.table_html(stratified))]
+if drift_table is not None:
+    tables.append(("Temporal drift: eval normals vs the later drift split", "html",
+                   plots.table_html(drift_table)))
+figs = tables + figs
 
 report = plots.write_report(f"{output_dir}/report.html", figs)
 logger.info(f"Wrote {report}")

@@ -54,6 +54,7 @@ changing a setting means editing that constant. Most scripts share these constan
 |---|---|
 | `RUN_NAME` | names the output directory and checkpoint files. It usually includes capture, width and backbone, e.g. `SeqAE_CICAPT_d128_Mamba_s512` |
 | `DATASET` | `DATASETS["<capture>"]` ([artefacts](artefacts.md#dataset-registry)) |
+| `DATA_ROLES` | stages 6–7 and `embedding_viz.py`: which data sections the script reads, and in which role ([§ Data roles](#data-roles)) |
 | `DEVICE_INDEX` | which GPU |
 | `SMOKE` | runs the same code path at a tiny scale and appends `_smoke` to the output dir, so a smoke run cannot overwrite a real one. Run it once before every real run |
 | `MAX_STEPS_PER_EPOCH` | caps the number of batches per epoch (`None` = full epoch) |
@@ -63,7 +64,7 @@ changing a setting means editing that constant. Most scripts share these constan
 ## `PreTraining/RunConfig.py`
 
 This file holds everything that is the same across experiments: the dataset registry,
-the token constants, `make_id_encoder`, `packet_encoder_params`, `setup_run` (creates
+`DataRoles` ([§ Data roles](#data-roles)), the token constants, `make_id_encoder`, `packet_encoder_params`, `setup_run` (creates
 the output dir and sets up file and stdout logging), `resolve_device`,
 `cosine_warmup_lambda`, `fixed_eval_batches` (a fixed held-out subset, so eval numbers
 can be compared across evals), `MetricsCsv` (moves aside a CSV whose columns are stale)
@@ -75,16 +76,51 @@ copies of the logging, metrics and curve code. Scripts that do not use `setup_ru
 create their own output directory, because a `logging.FileHandler` raises if the
 directory is missing.
 
+## Data roles
+
+A script that reads evaluation data declares all of it in one `DATA_ROLES` constant near
+its top. The constant maps the script's own roles to dataset sections:
+
+```python
+DATA_ROLES = {"fit": ("ad_fit",), "calib": ("ad_calib",), "eval_neg": ("val",),
+              "eval_pos": (ALL_ATTACKS,), "drift": ("late",)}
+```
+
+A section is a split name or an attack-capture stem. `ALL_ATTACKS` expands to every
+attack section available. The script roles differ per script, while the dataset sections
+come from `DatasetPaths.sections()` (stage 6) or `EmbeddingAD/data.py · embedding_sections`
+(the embedding directory). To point a script at a dataset with a different design, change
+the map, not the code.
+
+`RunConfig.DataRoles` enforces the map and logs everything it covers to the run log:
+
+- At startup it rejects unknown sections and sections shared between roles. A shared
+  section is allowed only for a pair of roles named in `allow_shared`. It then logs a
+  `DATA ROLES` block: each role and its sections, and the available sections that this
+  run will not read.
+- `touch(role, section, path, rows)` is called at every disk read and logs one
+  `DATA ACCESS role=… section=… rows=… path=…` line. It raises if the section is not
+  mapped to that role.
+
+The run log is therefore a complete record of which data a run read, and `grep "DATA
+ACCESS"` lists it. Scripts that use this today: `SequenceEmbeddingAD.py`,
+`EmbeddingADSuite.py` and `embedding_viz.py`. The training stages read only `train`/`test`
+and do not use it yet.
+
 ## Split role naming
 
-The naming here is the reverse of the usual convention:
+Every capture uses the same six splits, in time order
+([02 § Split roles](../components/02-temporal-split.md#split-roles)). The naming of the
+first three is the reverse of the usual convention:
 
 | Role | Used for |
 |---|---|
 | `train` | fitting the packet and sequence AEs |
 | `test` | **monitored during training**, and used to select `_best` checkpoints |
+| `ad_fit` | fitting the anomaly detectors |
+| `ad_calib` | calibrating the detector thresholds, without labels |
 | `val` | **final held-out set**, read once for the reported numbers |
-| `ad_fit`, `ad_calib`, `late` | six-role layout only; see [02](../components/02-temporal-split.md#split-roles) |
+| `late` | the tail after `val`; the AD suite's `drift` role |
 
 Every rerun that reads `val` uses it up again. Run with `SMOKE` to check the wiring
 before any run that reads `val`.

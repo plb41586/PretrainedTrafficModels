@@ -20,7 +20,6 @@ data_artefacts/
 │               ├── meta.json
 │               ├── flow_offsets.parquet
 │               └── shard_XXXX.npy
-└── deprecated_*/                                    pre-merge extractor output, read by nothing
 
 RawByteTrafficModelling/
 ├── PreTraining/TrainingOutputs/<RUN_NAME>/          stages 3 and 5
@@ -29,6 +28,12 @@ RawByteTrafficModelling/
 └── AnomalyDetection/Outputs/
     ├── Embeddings/SequenceEmbeddings_<RUN_NAME>/    stage 6
     └── AD/<RUN_NAME>_eval-<split>/                  stage 7
+
+archive/                                             temporary, git-ignored; read by nothing
+└── <same relative paths as above>                   pre-six-role artefacts (the old IIoTset
+                                                     split, runs trained on it, deprecated_*
+                                                     extractor output, legacy AD outputs).
+                                                     Deleted once IIoTset is retrained
 ```
 
 ## Dataset registry
@@ -44,10 +49,13 @@ and each capture has one entry in `RunConfig.DATASETS`. Scripts select a capture
 | `splits` | every split name present in `flow_split/`. `split(name)` raises on any other name |
 | `has_attacks` | whether `attacks/` exists. `attacks` is `None` when it does not |
 | `train` / `test` / `val` | shorthand for `split("train")` and so on |
+| `attack_names()` | sorted stems of `attacks/*.parquet` (the attack classes). Empty without attacks |
+| `attack(name)` | path to one attack parquet. Raises on an unknown name |
+| `sections()` | every split and attack name, mapped to `NORMAL` / `ATTACK`, as input to `DataRoles` |
 | `latent_cache(tag, split)` | `flow_split/latents_<tag>/<split>` |
 
-The current entries have different split layouts; see
-[02 § Current state](../components/02-temporal-split.md#current-state).
+`splits` defaults to `SIX_ROLE_SPLITS`, the only layout
+([02 § Split roles](../components/02-temporal-split.md#split-roles)).
 
 ## Packet parquet (stage 1 → stage 2)
 
@@ -119,7 +127,10 @@ packet-AE checkpoint.
 ## Embedding directory (stage 6 → stage 7)
 
 Written by `AnomalyDetection/SequenceEmbeddingAD.py` and read by
-`AnomalyDetection/EmbeddingAD/data.py::load_embedding_dir`.
+`AnomalyDetection/EmbeddingAD/data.py::load_embedding_dir`. That function reads only the
+`.npy` files the caller's `DATA_ROLES` map names, and filters `metadata.parquet` to the same
+sets. `embedding_sections` reads only the `set`/`label` columns of the metadata, to list
+what the directory holds.
 
 | File | Content |
 |---|---|
@@ -131,7 +142,8 @@ Written by `AnomalyDetection/SequenceEmbeddingAD.py` and read by
 ## AD outputs (stage 7)
 
 `scores.parquet` (the metadata columns plus one `score_<detector>` column per detector),
-`metrics.parquet` (long format: `detector`, `attack`, `bin`, `metric`, `value`), PNG
+`metrics.parquet` (long format: `negatives`, `detector`, `attack`, `bin`, `metric`, `value`,
+where `negatives` is `eval_neg` or `drift`), PNG
 figures, `projection.html`, and `report.html`, which combines all of them.
 
 ## Lineage and provenance checks

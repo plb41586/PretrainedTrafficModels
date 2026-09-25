@@ -6,14 +6,14 @@ flow bottleneck vector z, one .npy per set, into a single directory. The filenam
 stem is the legend label, which is the contract Embedding_Viz.ipynb / embedding_viz.py
 already expect (they glob *.npy and label by stem).
 
-The point of the exercise: keep `train` as a dense background in the UMAP plot and
-blend `test` / `val` / the per-attack sets in and out, to see whether attack flows sit
-further from the training manifold than held-out normal flows do.
+The export is the input of EmbeddingADSuite.py (and embedding_viz.py): one vector per
+window for every split the detectors fit, calibrate or evaluate on, plus every attack
+capture. Which sections are read, and how, is the DATA_ROLES map below.
 
-Two source paths, because only some splits have a packet-latent cache:
-  - train / test  -> cached latents (free, no packet forward)
-  - val + attacks -> raw tokens, encoded through the frozen packet encoder that rides
-                     inside the sequence-AE checkpoint
+Two source paths, because only the training splits have a packet-latent cache:
+  - cached (train / test)              -> cached latents (free, no packet forward)
+  - token  (the AD splits + attacks)   -> raw tokens, encoded through the frozen packet
+                                          encoder that rides inside the sequence-AE checkpoint
 Both feed the same Sequence_Encoder. The token path only encodes *real* packets and
 leaves padding slots as zeros, which is exactly what the cache holds -- CROSS_CHECK
 below verifies the two paths agree before any of the attack sets are written.
@@ -31,7 +31,14 @@ from RawByteTrafficModelling.ModelComponents.DataUtils import (
     PreTrainingDatasetHandler,
     load_latent_cache,
 )
-from RawByteTrafficModelling.PreTraining.RunConfig import DATASETS, resolve_device
+from RawByteTrafficModelling.PreTraining.RunConfig import (
+    ALL_ATTACKS,
+    ATTACK,
+    DATASETS,
+    NORMAL,
+    DataRoles,
+    resolve_device,
+)
 import polars as pl
 import numpy as np
 import torch
@@ -47,20 +54,21 @@ SEQ_AE_CKPT = (f"RawByteTrafficModelling/PreTraining/TrainingOutputs/{RUN_NAME}/
 output_dir = f"RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_{RUN_NAME}"
 
 DATASET = DATASETS["IIoTset-Ferrag"]
-CACHE_TAG = "PacketAE_d128_best"       # must match CachePacketLatents
+CACHE_TAG = "PacketAE_IIoTset_d128_best"       # must match CachePacketLatents
 
-# Sets that already have a packet-latent cache from CachePacketLatents.
-CACHED_SETS = [
-    ("train", DATASET.latent_cache(CACHE_TAG, "train")),
-    ("test",  DATASET.latent_cache(CACHE_TAG, "test")),
-]
-# Sets that have no cache and must be encoded from bytes.
-TOKEN_SETS = [
-    ("val", DATASET.val),
-]
-# One .npy per attacks/*.parquet, stem = attack name. Attack labelling in this dataset
-# is by filename -- no parquet carries an AttackLabel column (see TODO.md).
-ATTACK_DIR = DATASET.attacks
+# Which sections of DATASET this run reads, and as what. Nothing outside this map is
+# opened; every read is logged as a DATA ACCESS line (RunConfig.DataRoles).
+#   cached       splits with a packet-latent cache from CachePacketLatents (no packet forward)
+#   token        splits encoded from bytes through the packet encoder in the checkpoint
+#   attack       attack captures, one .npy each, stem = attack class. Labelling is by
+#                filename -- no parquet carries an AttackLabel column (see TODO.md)
+#   cross_check  a split read both ways to prove the two paths agree; needs a cache
+DATA_ROLES = {
+    "cached":      ("train", "test"),
+    "token":       ("ad_fit", "ad_calib", "val", "late"),
+    "attack":      (ALL_ATTACKS,),
+    "cross_check": ("test",),
+}
 
 PACKETS_PER_SEQUENCE = 65      # P, including the slot the seq-CLS overwrites
 MAX_WINDOWS_PER_SET = 20_000   # evenly spaced subset; the viz subsamples again anyway
@@ -71,7 +79,6 @@ PACKET_BATCH = 512             # packets per packet-encoder forward (matches Cac
 # 0 disables. A mismatch here means the flow index no longer reproduces the cache's
 # row order, which would silently corrupt every token-path set.
 CROSS_CHECK_WINDOWS = 32
-CROSS_CHECK_SPLIT = DATASET.test
 CROSS_CHECK_TOL = 1e-2
 
 # Wiring test: tiny caps, two attack files, and a separate output dir so a smoke run
@@ -93,6 +100,21 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+roles = DataRoles(DATA_ROLES, DATASET.sections(), logger,
+                  allow_shared=(("cached", "cross_check"),))
+if set(roles.sections("cached")) & set(roles.sections("token")):
+    raise ValueError("a split in both 'cached' and 'token' would be exported twice under "
+                     "one label")
+for role in ("cached", "token", "cross_check"):
+    if any(roles.kind(s) != NORMAL for s in roles.sections(role)):
+        raise ValueError(f"role {role!r} takes normal splits only")
+if any(roles.kind(s) != ATTACK for s in roles.sections("attack")):
+    raise ValueError("role 'attack' takes attack captures only")
+if len(roles.sections("cross_check")) > 1:
+    raise ValueError("cross_check takes at most one split")
+if CROSS_CHECK_WINDOWS and not roles.sections("cross_check"):
+    raise ValueError("CROSS_CHECK_WINDOWS > 0 but no cross_check split is mapped")
 
 device = resolve_device(0)
 
@@ -195,9 +217,11 @@ def log_length_profile(label: str, windows: np.ndarray):
                 f"{(lens == 1).sum()} single-packet")
 
 
-def embed_cached(label: str, cache_dir: str):
+def embed_cached(role: str, label: str):
     """Sequence embeddings for a split that already has a packet-latent cache."""
+    cache_dir = DATASET.latent_cache(CACHE_TAG, label)
     latents, flow_offsets, _meta = load_latent_cache(cache_dir, meta_only_ckpt(cache_dir))
+    roles.touch(role, label, cache_dir, rows=latents.shape[0])
     handler = CachedLatentSequenceHandler(latents, flow_offsets, PACKETS_PER_SEQUENCE)
     windows = pick_windows(enumerate_windows(handler.starts, handler.lengths))
     log_length_profile(label, windows)
@@ -211,9 +235,11 @@ def embed_cached(label: str, cache_dir: str):
     return torch.cat(Z).numpy(), [flow_keys[f] for f in windows[:, 0]], windows[:, 2]
 
 
-def embed_tokens(label: str, split_file: str):
-    """Sequence embeddings for a split with no cache, straight from the bytes."""
+def embed_tokens(role: str, label: str):
+    """Sequence embeddings for a split (or attack capture) with no cache, from the bytes."""
+    split_file = DATASET.attack(label) if role == "attack" else DATASET.split(label)
     data = pl.read_parquet(split_file)
+    roles.touch(role, label, split_file, rows=data.height)
     handler = PreTrainingDatasetHandler(data, SEQ_LEN, byte_encoder)
     flow_index = handler.build_flow_index()
     row_order, starts, lengths = flow_offsets_from_index(flow_index)
@@ -237,18 +263,21 @@ def meta_only_ckpt(cache_dir: str):
 
 
 # --- Cross-path check ------------------------------------------------------
-# `test` has both a cache and a parquet, so the two paths must agree there. This is the
-# only check that catches a flow-index / row-order drift between them.
+# The cross_check split has both a cache and a parquet, so the two paths must agree
+# there. This is the only check that catches a flow-index / row-order drift between them.
 if CROSS_CHECK_WINDOWS:
-    check_cache = dict(CACHED_SETS)["test"]
+    (cc_split,) = roles.sections("cross_check")
+    check_cache = DATASET.latent_cache(CACHE_TAG, cc_split)
     cc_latents, cc_offsets, _cc_meta = load_latent_cache(check_cache, meta_only_ckpt(check_cache))
+    roles.touch("cross_check", cc_split, check_cache, rows=cc_latents.shape[0])
     cc_handler = CachedLatentSequenceHandler(cc_latents, cc_offsets, PACKETS_PER_SEQUENCE)
     cc_windows = enumerate_windows(cc_handler.starts, cc_handler.lengths)[:CROSS_CHECK_WINDOWS]
 
     cc_lat, cc_lens = cc_handler.latent_batch_from_windows(cc_windows[:, 1:3])
     z_cached = encode_windows(cc_lat, cc_lens)
 
-    cc_data = pl.read_parquet(CROSS_CHECK_SPLIT)
+    cc_data = pl.read_parquet(DATASET.split(cc_split))
+    roles.touch("cross_check", cc_split, DATASET.split(cc_split), rows=cc_data.height)
     cc_token_handler = PreTrainingDatasetHandler(cc_data, SEQ_LEN, byte_encoder)
     cc_row_order, cc_starts, cc_lengths = flow_offsets_from_index(cc_token_handler.build_flow_index())
     assert (cc_starts.shape == cc_handler.starts.shape
@@ -261,37 +290,36 @@ if CROSS_CHECK_WINDOWS:
 
     cc_delta = (z_cached - z_tokens).abs().max().item()
     assert cc_delta < CROSS_CHECK_TOL, (
-        f"cached and token paths disagree by {cc_delta:.2e} on {CROSS_CHECK_WINDOWS} test "
-        f"windows -- the row-order mapping is wrong, attack embeddings would be garbage")
-    logger.info(f"Cross-path check OK on {CROSS_CHECK_WINDOWS} test windows: "
+        f"cached and token paths disagree by {cc_delta:.2e} on {CROSS_CHECK_WINDOWS} "
+        f"{cc_split} windows -- the row-order mapping is wrong, token-path embeddings "
+        f"would be garbage")
+    logger.info(f"Cross-path check OK on {CROSS_CHECK_WINDOWS} {cc_split} windows: "
                 f"max|cached-live| {cc_delta:.2e}")
     del cc_latents, cc_data
 
 # --- Export ----------------------------------------------------------------
-attack_files = sorted(f for f in os.listdir(ATTACK_DIR) if f.endswith(".parquet"))
+attack_labels = roles.sections("attack")
 if SMOKE:
-    attack_files = attack_files[:2]
-logger.info(f"Sets: {[n for n, _ in CACHED_SETS + TOKEN_SETS]} + {len(attack_files)} attacks")
+    attack_labels = attack_labels[:2]
 
 embeddings = {}      # label -> (N, D_seq) float32
 metadata = {}        # label -> (set_name, flow_keys, seq_lens)
 
-for label, cache_dir in CACHED_SETS:
-    logger.info(f"Embedding {label} from cache {cache_dir}")
-    Z, flow_keys, seq_lens = embed_cached(label, cache_dir)
+for label in roles.sections("cached"):
+    logger.info(f"Embedding {label} from its latent cache")
+    Z, flow_keys, seq_lens = embed_cached("cached", label)
     embeddings[label] = Z
     metadata[label] = (label, flow_keys, seq_lens)
 
-for label, split_file in TOKEN_SETS:
-    logger.info(f"Embedding {label} from {split_file}")
-    Z, flow_keys, seq_lens = embed_tokens(label, split_file)
+for label in roles.sections("token"):
+    logger.info(f"Embedding {label} from bytes")
+    Z, flow_keys, seq_lens = embed_tokens("token", label)
     embeddings[label] = Z
     metadata[label] = (label, flow_keys, seq_lens)
 
-for attack_file in attack_files:
-    label = attack_file.removesuffix(".parquet")
+for label in attack_labels:
     logger.info(f"Embedding attack {label}")
-    Z, flow_keys, seq_lens = embed_tokens(label, f"{ATTACK_DIR}/{attack_file}")
+    Z, flow_keys, seq_lens = embed_tokens("attack", label)
     embeddings[label] = Z
     metadata[label] = ("attack", flow_keys, seq_lens)
 

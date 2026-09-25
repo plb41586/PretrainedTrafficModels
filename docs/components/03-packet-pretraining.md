@@ -60,6 +60,3 @@ per GPU ([conventions](../reference/conventions.md#running-anything)).
   instead of wrapping `Packet_Encoder`. Its state-dict keys therefore need remapping
   before the sequence level can load it, even though the shapes match (both come from
   `packet_encoder_params`).
-- **Packet-level AD (legacy):** `AnomalyDetection/AutoEncoderAD.py` (per-packet
-  reconstruction loss) and `EncoderEmbeddingAD.py` (packet embedding export). Both are
-  older scripts; see [07 § Other scripts](07-anomaly-detection.md#other-scripts).
