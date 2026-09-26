@@ -31,7 +31,8 @@ PCAP feature extractor.
   places, remove one copy and link to the other.
 - **Reference code as `path · symbol`, never by line number.** Do not copy hyperparameter
   values or results into the docs: values stay as script constants, and results stay with
-  their run outputs.
+  their run outputs. The exception is the experiment diary in `docs/experiments/`
+  (see its README).
 - **When the code and the docs disagree, the code is right.** Fix the doc (or ask the user)
   instead of acting on the stale text.
 

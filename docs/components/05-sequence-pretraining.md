@@ -73,8 +73,8 @@ cannot read off the bytes: it has to learn a behavioural fingerprint of the devi
   anchor.
 - **Metrics:** reported pooled, for supported groups only (`*_sup`), and per `seq_len` bin.
 - **Current configuration:** IIoTset-specific. `STAGE1_RUN`, `DATASET`, `CACHE_TAG` and
-  `PACKET_AE_CKPT` all point at IIoTset runs, which must be retrained on the six-role
-  re-split before they exist again ([02 § Current state](02-temporal-split.md#current-state)).
+  `PACKET_AE_CKPT` all point at the IIoTset runs trained on the six-role split
+  ([02 § Current state](02-temporal-split.md#current-state)).
 
 ## Reuse
 

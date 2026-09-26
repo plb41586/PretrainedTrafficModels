@@ -42,10 +42,10 @@ Blocks running the pipeline end to end on a second capture. The details are in t
 linked docs, so they are not repeated here. Mechanism changes (role mapping, how to handle
 oversize frames, re-splitting) need to be agreed with the user before implementing.
 
-- [ ] **Retrain IIoTset-Ferrag on the six-role split, then delete `archive/`.** Split →
-      packet AE → cache + check → sequence AE (→ structure fine-tune) → export → AD, with a SMOKE
-      run first each time. `rm -rf archive/` only after the new results are confirmed →
-      `docs/components/02-temporal-split.md § Current state`.
+- [ ] **Decide how to proceed after the first six-split IIoTset run, then delete `archive/`.**
+      The retrain is done, but AD came out far below the three-split run →
+      `docs/experiments/2026-09-25-iiotset-six-split-first-run.md`. `rm -rf archive/` only
+      once the comparison with the old run is no longer needed.
 - [ ] **`ID_Encoder` raises on frames of 1520 bytes or more** (jumbo frames, TSO/GRO captures)
       → `docs/reference/data-representation.md § Constants`.
 

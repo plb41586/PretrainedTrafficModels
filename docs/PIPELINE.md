@@ -103,8 +103,11 @@ another task can branch off at whichever one fits:
 - **Hyperparameter values are not copied here.** They are constants in the scripts and
   change from run to run. A doc names the constant, and the script's own comments explain
   the value it currently has.
-- **Results are not recorded here.** Numbers belong with their run in `TrainingOutputs/`
-  or `Outputs/`, and in the commit that produced them.
+- **Results are not recorded here, except in the experiment diary.** Numbers belong with
+  their run in `TrainingOutputs/` or `Outputs/`, and in the commit that produced them.
+  The one exception is [`experiments/`](experiments/README.md): dated entries that
+  compare runs and explain an outcome. They are snapshots and are not kept in step with
+  the code.
 - **`docs/` is the only description of the project.** `CLAUDE.md` contains no
   description. It holds the coding agent's working rules and the list of invariants,
   each of which links back to the doc that explains it.

@@ -61,7 +61,7 @@ from RawByteTrafficModelling.AnomalyDetection.EmbeddingAD.detectors import (
 from RawByteTrafficModelling.PreTraining.RunConfig import ALL_ATTACKS, DataRoles
 
 ### Config
-RUN_NAME = "SeqAE_IIoTset_d128_Mamba_s512"
+RUN_NAME = "SeqAEStruct_IIoTset_d128_Mamba_s512_pair_l010"
 EMBEDDING_DIR = f"RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_{RUN_NAME}"
 
 # Which exported sets play which role -- the only sets this run reads. Sections are the

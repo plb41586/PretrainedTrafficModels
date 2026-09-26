@@ -73,7 +73,7 @@ Every capture uses the six-role layout, which is the `DatasetPaths.splits` defau
 | Capture | Produced by |
 |---|---|
 | `CICAPT-IIoT` | the current `split_flows` |
-| `IIoTset-Ferrag` | **re-split pending.** It is being re-cut with the current `split_flows`, using the same fractions as CICAPT. Its old three-split, flow-selection split, and everything trained on that split, are in `archive/` until the retrain is done ([artefacts § Directory layout](../reference/artefacts.md#directory-layout)) |
+| `IIoTset-Ferrag` | the current `split_flows`, with the same fractions as CICAPT. The old three-split, flow-selection split, and everything trained on it, are in `archive/` until you decide how to proceed ([artefacts § Directory layout](../reference/artefacts.md#directory-layout)). The four AD splits all fall in the last ~10 h of the capture; for how that affected the first AD run, see the [experiment diary](../experiments/2026-09-25-iiotset-six-split-first-run.md) |
 
 ## Scope
 

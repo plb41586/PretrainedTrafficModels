@@ -33,7 +33,7 @@ archive/                                             temporary, git-ignored; rea
 └── <same relative paths as above>                   pre-six-role artefacts (the old IIoTset
                                                      split, runs trained on it, deprecated_*
                                                      extractor output, legacy AD outputs).
-                                                     Deleted once IIoTset is retrained
+                                                     Kept for comparison, see docs/experiments/
 ```
 
 ## Dataset registry
