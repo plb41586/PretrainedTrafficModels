@@ -23,4 +23,4 @@ the code changes later, so a symbol or path in an old entry may no longer exist.
 
 | Date | Entry | Outcome |
 |---|---|---|
-| 2026-09-25 | [First six-split IIoTset run](2026-09-25-iiotset-six-split-first-run.md) | AD far below the three-split run; thresholds do not transfer from `ad_calib` to `val` |
+| 2026-09-25 | [First six-split IIoTset run](2026-09-25-iiotset-six-split-first-run.md) | AD far below the three-split run; thresholds do not transfer from `ad_calib` to later periods. The stage-1 follow-up (2026-09-26) points to the split, not the fine-tune |

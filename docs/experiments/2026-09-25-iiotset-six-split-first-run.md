@@ -9,8 +9,14 @@ period and traffic mix as the data the detectors were fitted on. The new split h
 a later period whose traffic the short AD fitting and calibration windows do not cover.
 The model and the attack side changed little. See [§ Most likely cause](#most-likely-cause).
 
-`val` was read in this evaluation. Any design change made in response is informed by `val`
-and must be recorded as such.
+**Follow-up (2026-09-26):** the same evaluation of the six-split *stage-1* model
+confirms that the split, not the fine-tune, is the main cause. Stage 1 also misses the
+FPR target by a wide margin (24% on `val` at a 1% target) and fails on short windows.
+See [§ Follow-up: stage-1 model on the six-split](#follow-up-stage-1-model-on-the-six-split).
+
+`val` has been read **twice** in this experiment: once for the fine-tuned model
+(2026-09-25) and once for the stage-1 model (2026-09-26). Any design change made in
+response is informed by `val` and must be recorded as such.
 
 ## What ran
 
@@ -92,7 +98,7 @@ the 2–8 bin (0.976 → 0.641).
 model. The fine-tune halved the effective rank of `z` in its first epoch, and a
 lower-rank `z` gives Mahalanobis a sharper covariance, so it may amplify the
 distribution shift above. There is no AD run of the new stage-1 model to separate the
-two effects.
+two effects. *(Tested in the follow-up: not the main cause, and its effect is mixed.)*
 
 **Ruled out as causes:**
 - **Worse upstream models.** Reconstruction is higher than before at both levels.
@@ -106,15 +112,56 @@ two effects.
 **Unexplained so far:** `late` comes after `val` and is just as short (median 33), yet
 its Mahalanobis FPR is only 5.9%. Window length alone therefore does not explain `val`.
 This fits `val`'s period containing a traffic regime that `ad_fit` and `ad_calib` do not,
-which `late` does not share.
+which `late` does not share. *(Resolved by the follow-up: the low FPR on `late` is
+specific to the fine-tuned model. Stage 1 overshoots on `late` as much as on `val`.)*
+
+## Follow-up: stage-1 model on the six-split
+
+Run 2026-09-26: `SeqAE_IIoTset_d128_Mamba_s512` (best checkpoint, epoch 43) exported
+and evaluated with the same `DATA_ROLES`, detectors and settings. Outputs are in
+`Outputs/Embeddings/SequenceEmbeddings_SeqAE_IIoTset_d128_Mamba_s512` and
+`Outputs/AD/SeqAE_IIoTset_d128_Mamba_s512_eval-val`. Role sizes are identical to the
+fine-tuned run.
+
+| Mahalanobis (focus) | Three-split, stage 1 | Six-split, stage 1 | Six-split, fine-tuned |
+|---|---|---|---|
+| Pooled AUROC | 0.996 | 0.941 | 0.878 |
+| TPR @ q0.99 | 1.000 | 0.885 | 0.866 |
+| Realised FPR on `val` @ q0.99 (target 1%) | 5.7% | 24.3% | 36.4% |
+| Realised FPR on `late` @ q0.99 | — | 21.9% | 5.9% |
+| AUROC, bins 2–8 / 9–32 / 33–64 | 0.976 / 0.978 / 0.994 | **0.398** / 0.986 / 0.987 | 0.641 / 0.995 / 0.978 |
+| kNN-1 / kNN-20 pooled AUROC | 0.161 / 0.168 | 0.248 / 0.312 | 0.209 / 0.167 |
+
+What it shows:
+
+- **The split is the main cause.** Without the fine-tune, the stage-1 model on the
+  six-split still misses the FPR target by a factor of about 24 on `val` and 22 on
+  `late`, against 5.7 in the three-split run. Both later periods are miscalibrated
+  alike. The consistent explanation is that any period after the 5-hour
+  `ad_fit`/`ad_calib` window looks different from it, rather than a regime specific to
+  `val`.
+- **Short windows fail in both models.** The 2–8 bin falls below chance for stage 1
+  (0.398) and is weak for the fine-tune (0.641), against 0.976 in the three-split run.
+  Short normal windows in the later periods score as anomalous as short attacks. The
+  longer bins stay at 0.98–0.99 in every run.
+- **The fine-tune is not the main cause, and its effect is mixed.** Compared with
+  stage 1 on the same split, it has a lower pooled AUROC and a higher FPR on `val`, but
+  a better 2–8 bin and a much lower FPR on `late`. It shifts which normal period looks
+  off rather than making things uniformly worse.
+- **The kNN inversion is present in every run**, including stage 1 on both splits, which
+  confirms it is a length artefact of the pooled metric.
+
+Other detectors show the same miscalibration on stage 1. For example, PCA reconstruction
+has a pooled AUROC of 0.983 but a realised FPR of 17.7% on `val` at the 1% target.
+Choosing a detector from these rows would select on `val`, so the focus stays on
+Mahalanobis.
 
 ## Checks that would separate the explanations
 
-None of these has been run. Each one that reads `val` spends it again.
+Each one that reads `val` spends it again.
 
-1. **Split out the fine-tune:** export and evaluate the six-split stage-1 model
-   `SeqAE_IIoTset_d128_Mamba_s512` with the same `DATA_ROLES`. If it shows the same
-   FPR gap, the split is the cause. Reads `val`.
+1. ~~**Split out the fine-tune**~~ **Done 2026-09-26**, see the follow-up above. The
+   split is the main cause.
 2. **Per-bin realised FPR on `val` and `late`:** available in this run's
    `metrics.parquet` (the `negatives` column). It shows whether the FPR gap lives in the
    short bins. Reads only existing outputs.
