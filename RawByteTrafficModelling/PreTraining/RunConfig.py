@@ -149,7 +149,13 @@ class DatasetPaths:
 
 
 DATASETS = {
-    "IIoTset-Ferrag": DatasetPaths("IIoTset-Ferrag"),
+    # No `late` for now: its share went to the AD splits, to test whether their narrow
+    # time span (and the shorter windows it produces) drove the first six-split AD result
+    # (docs/experiments/2026-09-25-iiotset-six-split-first-run.md).
+    "IIoTset-Ferrag": DatasetPaths(
+        "IIoTset-Ferrag",
+        splits=("train", "test", "ad_fit", "ad_calib", "val"),
+    ),
     "CICAPT-IIoT": DatasetPaths(
         "CICAPT-IIoT",
         source="CICAPT_Phase1.parquet",

@@ -39,6 +39,12 @@ contain larger ones. See [01 § Known gaps](../components/01-feature-extraction.
 returns one row per flow, with the parquet row indices of its packets in timestamp order.
 Flows are sorted by `flow_key`.
 
+When the parquet has a `session` column (a session split,
+[02 § Sessions](../components/02-temporal-split.md#sessions)), a flow is a
+(`flow_key`, `session`) pair instead. A `flow_key` recorded in several sessions becomes one
+flow per session, so no window spans the pause between two recordings. Parquets without
+the column (strict splits, attack captures) are grouped by `flow_key` alone, as before.
+
 This index defines **cache row order** ([artefacts § latent cache](artefacts.md#packet-latent-cache-stage-4--stages-5-6)).
 It is deterministic for a given parquet, which is why the token path (encoding from
 bytes) and the cache path produce identical windows. The alignment checks in

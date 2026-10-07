@@ -88,10 +88,15 @@ Never break these. The linked doc explains why each one exists.
 - **Never select or exclude flows by duration or packet count, under any circumstances.**
   The split cuts every flow uniformly at the time boundaries. Do not reintroduce
   length- or duration-conditional handling, quantile gates, or "keep short flows whole"
-  shortcuts. (`docs/components/02-temporal-split.md`)
+  shortcuts. The one sanctioned exclusion is a whole recording session below
+  `min_session_share`, decided at session level and listed in `split_report.json`.
+  (`docs/components/02-temporal-split.md`)
 - **`SplitFlowsDF` is the only splitter.** Do not reintroduce a packet-level (row-slice)
   split. A flow appearing in several splits is intended; a boundary that is not a clean
-  time boundary is a bug. (`docs/components/02-temporal-split.md`)
+  time boundary is a bug. The goal is one contiguous interval per split. The only
+  sanctioned deviation is a capture made of separate recording sessions (`session_gap_s`):
+  then each session is cut on its own clock, and every boundary is still a clean time
+  boundary within its session. (`docs/components/02-temporal-split.md § Sessions`)
 - **Do not mix `flow_key` formats within one artefact lineage.** A re-extracted capture
   needs its split, caches, checkpoints and embeddings regenerated together, and the
   provenance asserts must stay in place. (`docs/reference/artefacts.md § Lineage`)

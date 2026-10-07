@@ -136,6 +136,10 @@ def cache_split(split: str):
         "start": starts,
         "length": lengths,
     })
+    # A session split breaks flows at sessions, so one flow_key can own several rows here;
+    # the session says which recording each one came from.
+    if "session" in flow_index.columns:
+        flow_offsets = flow_offsets.with_columns(flow_index["session"])
     flow_offsets.write_parquet(f"{cache_dir}/flow_offsets.parquet")
     logger.info(f"Wrote flow_offsets.parquet: {flow_offsets.height} flows, "
                 f"{data.height} packets")

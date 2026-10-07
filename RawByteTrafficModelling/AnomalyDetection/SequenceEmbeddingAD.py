@@ -48,7 +48,7 @@ import os
 ### Set Export Parameters
 # The sequence-AE run to export. s512 was chosen from the width sweep: it reaches 96.7%
 # of the packet-decoder byte-accuracy ceiling at 45% of s768's parameters.
-RUN_NAME = "SeqAEStruct_IIoTset_d128_Mamba_s512_pair_l010"
+RUN_NAME = "SeqAE_IIoTset_d128_Mamba_s512"
 SEQ_AE_CKPT = (f"RawByteTrafficModelling/PreTraining/TrainingOutputs/{RUN_NAME}/"
                f"SequenceLevelAutoEncoder_{RUN_NAME}_best.ckpt")
 output_dir = f"RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_{RUN_NAME}"
@@ -65,7 +65,7 @@ CACHE_TAG = "PacketAE_IIoTset_d128_best"       # must match CachePacketLatents
 #   cross_check  a split read both ways to prove the two paths agree; needs a cache
 DATA_ROLES = {
     "cached":      ("train", "test"),
-    "token":       ("ad_fit", "ad_calib", "val", "late"),
+    "token":       ("ad_fit", "ad_calib", "val"),
     "attack":      (ALL_ATTACKS,),
     "cross_check": ("test",),
 }

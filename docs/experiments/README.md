@@ -24,3 +24,4 @@ the code changes later, so a symbol or path in an old entry may no longer exist.
 | Date | Entry | Outcome |
 |---|---|---|
 | 2026-09-25 | [First six-split IIoTset run](2026-09-25-iiotset-six-split-first-run.md) | AD far below the three-split run; thresholds do not transfer from `ad_calib` to later periods. The stage-1 follow-up (2026-09-26) points to the split, not the fine-tune |
+| 2026-10-07 | [IIoTset session split (second run)](2026-10-07-iiotset-session-split.md) | The session split fixes the short-window failure and the FPR overshoot. The thresholds now overshoot the other way (TPR 0.09%), and the long-window bin and pooled AUROC drop. The structure fine-tune collapsed to rank ~2 |

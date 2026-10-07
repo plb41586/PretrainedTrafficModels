@@ -570,24 +570,31 @@ class PreTrainingDatasetHandler():
 
     def build_flow_index(self) -> pl.DataFrame:
         """
-        Map every flow_key to the row indices of its packets, in timestamp order.
+        Map every flow to the row indices of its packets, in timestamp order.
+
+        A flow is a `flow_key`, or a (`flow_key`, `session`) pair when the data has a
+        `session` column. A session split (SplitFlowsDF, `session_gap_s`) writes that
+        column, so a flow_key recorded in several sessions becomes one flow per session,
+        and no window spans the pause between sessions. Data without the column (a strict
+        split, attack captures) is grouped exactly as before.
 
         Built once and cached on the handler. This is deliberately *not* done in
         __init__: the packet-level scripts construct this handler with seq_len=1
         and never touch flows, so they must not pay for the sort.
 
         Returns:
-            pl.DataFrame: columns `flow_key` (str) and `row_idx` (list[u32]),
-                          one row per flow. Flow order is the sorted flow_key
-                          order, and within a flow the indices are in
+            pl.DataFrame: columns `flow_key` (str), `row_idx` (list[u32]), and `session`
+                          when present -- one row per flow. Flow order is the sorted
+                          (flow_key, session) order, and within a flow the indices are in
                           (timestamp_s, timestamp_us) order.
         """
         if self._flow_index is None:
+            keys = ["flow_key", "session"] if "session" in self.data.columns else ["flow_key"]
             self._flow_index = (
                 self.data
                 .with_row_index("row_idx")
-                .sort(["flow_key", "timestamp_s", "timestamp_us"])
-                .group_by("flow_key", maintain_order=True)
+                .sort([*keys, "timestamp_s", "timestamp_us"])
+                .group_by(keys, maintain_order=True)
                 .agg(pl.col("row_idx"))
             )
         return self._flow_index

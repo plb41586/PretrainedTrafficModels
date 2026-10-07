@@ -30,10 +30,11 @@ RawByteTrafficModelling/
     └── AD/<RUN_NAME>_eval-<split>/                  stage 7
 
 archive/                                             temporary, git-ignored; read by nothing
-└── <same relative paths as above>                   pre-six-role artefacts (the old IIoTset
-                                                     split, runs trained on it, deprecated_*
-                                                     extractor output, legacy AD outputs).
-                                                     Kept for comparison, see docs/experiments/
+├── <same relative paths as above>                   pre-six-role artefacts (the old IIoTset
+│                                                    split, runs trained on it, deprecated_*
+│                                                    extractor output, legacy AD outputs)
+└── 2026-09-25-sixsplit/<same relative paths>        the first, strict six-split IIoTset run
+                                                     Both kept for comparison, see docs/experiments/
 ```
 
 ## Dataset registry
@@ -54,13 +55,13 @@ and each capture has one entry in `RunConfig.DATASETS`. Scripts select a capture
 | `sections()` | every split and attack name, mapped to `NORMAL` / `ATTACK`, as input to `DataRoles` |
 | `latent_cache(tag, split)` | `flow_split/latents_<tag>/<split>` |
 
-`splits` defaults to `SIX_ROLE_SPLITS`, the only layout
+`splits` defaults to `SIX_ROLE_SPLITS`; a capture may list a subset (IIoTset drops `late`)
 ([02 § Split roles](../components/02-temporal-split.md#split-roles)).
 
 ## Packet parquet (stage 1 → stage 2)
 
 Written by `feature_extraction/src/main.rs::ParquetSink`, with one row per packet. The
-split parquets (`flow_split/<role>.parquet`) and the attack parquets use the same schema.
+split parquets (`flow_split/<role>.parquet`) and the attack parquets use the same schema. A session split adds one column to the split parquets: `session` (i32, the recording session the packet belongs to).
 
 | Column | Type | Content |
 |---|---|---|
@@ -84,8 +85,8 @@ for ARP and ICMP.
 
 ## Split report
 
-`split_report.json` is written by `SplitFlowsDF.split_flows`. It records the requested and
-achieved ratios, the first and last timestamp and time span of each split, and
+`split_report.json` is written by `SplitFlowsDF.split_flows`. It records the `boundary_mode`, the session settings and the list of `sessions` (with any dropped ones marked), the requested and
+achieved shares (packet `ratio`, `time_share` and `active_time_share`), the outer extent and the per-session `pieces` of each split, and
 `flow_keys_crossing_a_boundary`. Check it after every split.
 
 ## Packet latent cache (stage 4 → stages 5, 6)
@@ -95,7 +96,7 @@ Written by `PreTraining/CachePacketLatents.py` and read by `DataUtils.py::load_l
 | File | Content |
 |---|---|
 | `shard_XXXX.npy` | float16 `(rows, D)` packet latents, `SHARD_ROWS` per shard, in **cache row order** |
-| `flow_offsets.parquet` | `flow_key`, `start`, `length`: each flow is the contiguous slice `latents[start:start+length]` |
+| `flow_offsets.parquet` | `flow_key`, `start`, `length` (and `session` for a session split): each flow is the contiguous slice `latents[start:start+length]` |
 | `meta.json` | `split_file`, `packet_ae_ckpt`, `packet_ae_sha256`, `latent_dim`, `num_rows`, `num_flows`, `shard_rows`, `num_shards`, `dtype` |
 
 Cache row order is the order of `PreTrainingDatasetHandler.build_flow_index()`: flows

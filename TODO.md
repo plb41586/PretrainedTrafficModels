@@ -42,10 +42,12 @@ Blocks running the pipeline end to end on a second capture. The details are in t
 linked docs, so they are not repeated here. Mechanism changes (role mapping, how to handle
 oversize frames, re-splitting) need to be agreed with the user before implementing.
 
-- [ ] **Decide how to proceed after the first six-split IIoTset run, then delete `archive/`.**
-      The retrain is done, but AD came out far below the three-split run →
-      `docs/experiments/2026-09-25-iiotset-six-split-first-run.md`. `rm -rf archive/` only
-      once the comparison with the old run is no longer needed.
+- [ ] **Decide how to proceed after the IIoTset session-split run.** The short-window and
+      FPR-overshoot failures are fixed, but the thresholds now overshoot the other way and
+      the structure fine-tune collapses →
+      `docs/experiments/2026-10-07-iiotset-session-split.md` (§ Checks).
+- [ ] **Delete `archive/`** (three-split and first six-split generations) once the
+      comparisons in `docs/experiments/` are no longer needed.
 - [ ] **`ID_Encoder` raises on frames of 1520 bytes or more** (jumbo frames, TSO/GRO captures)
       → `docs/reference/data-representation.md § Constants`.
 

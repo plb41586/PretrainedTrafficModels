@@ -52,7 +52,7 @@ ENCODER_DIM = 128              # was 64; the old run's non-pad accuracy plateaue
 ENCODER_LAYERS = 2             # unchanged, so width is the only variable vs. that run
 DECODER_LAYERS = 2
 
-# Measured ~2.0 s/step at bs=512 on one A5000. IIoTset six-role train is 5.36M packets
+# Measured ~2.0 s/step at bs=512 on one A5000. IIoTset session-split train is 5.35M packets
 # -> ~10.5k steps (~5.8 h) per epoch.
 # The cosine schedule spans the whole run, so changing this changes the LR curve
 # rather than just truncating it.
@@ -72,7 +72,7 @@ AMP_DTYPE = torch.bfloat16     # None disables autocast
 PAD_LOSS_WEIGHT = 0.1
 
 # One train epoch is ~5.4M packets (~10.5k batches at bs=512), so per-batch logging
-# and a full pass over the ~0.97M-packet test split are both far too expensive.
+# and a full pass over the ~0.38M-packet test split are both far too expensive.
 # Log running averages on an interval, and evaluate on a fixed random subset of
 # test drawn once so the number is comparable across evals.
 log_every_n_batches = 200

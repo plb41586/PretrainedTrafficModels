@@ -14,6 +14,16 @@ confirms that the split, not the fine-tune, is the main cause. Stage 1 also miss
 FPR target by a wide margin (24% on `val` at a 1% target) and fails on short windows.
 See [§ Follow-up: stage-1 model on the six-split](#follow-up-stage-1-model-on-the-six-split).
 
+**Later finding (2026-10-05): the capture is four recording sessions.** A per-day packet
+profile of `NormalMerged.parquet` shows traffic only on days 0–2 (16.7% of packets),
+day 28 (0.07%), day 36 (39.8%) and day 44 (43.4%) of the 45-day span. The "bursts" this
+entry describes are those sessions. In this run, the AEs trained on days 0–36, and
+`ad_fit`, `ad_calib`, `val` and `late` all came from the day-44 session. The
+three-split run drew every split from all sessions. This sharpens the explanation below:
+the AD splits were not just short. They all came from a recording session the AEs never
+trained on, and `ad_fit` was a 23-minute slice of it. The next run cuts each session separately
+([02 § Sessions](../components/02-temporal-split.md#sessions)).
+
 `val` has been read **twice** in this experiment: once for the fine-tuned model
 (2026-09-25) and once for the stage-1 model (2026-09-26). Any design change made in
 response is informed by `val` and must be recorded as such.
@@ -32,6 +42,10 @@ at the same fractions as CICAPT.
 | Structure fine-tune | `TrainingOutputs/SeqAEStruct_IIoTset_d128_Mamba_s512_pair_l010` |
 | Export | `Outputs/Embeddings/SequenceEmbeddings_SeqAEStruct_IIoTset_d128_Mamba_s512_pair_l010` |
 | AD | `Outputs/AD/SeqAEStruct_IIoTset_d128_Mamba_s512_pair_l010_eval-val` |
+
+Since 2026-10-05, all of these (split, cache, runs, embeddings, AD outputs, including
+the stage-1 follow-up) are archived under `archive/2026-09-25-sixsplit/` at the same
+relative paths.
 
 The comparison run is the archived three-split evaluation
 `archive/…/Outputs/AD/SeqAE_IIoTset_d128_Mamba_s512_eval-val` (2026-08-18). Its logs are

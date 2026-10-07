@@ -109,7 +109,7 @@ and do not use it yet.
 
 ## Split role naming
 
-Every capture uses the same six splits, in time order
+Captures use these six splits, in time order (a capture may leave out `late`)
 ([02 § Split roles](../components/02-temporal-split.md#split-roles)). The naming of the
 first three is the reverse of the usual convention:
 
