@@ -114,12 +114,58 @@ reconstruction). Only the length baseline keeps a usable operating point (TPR 73
   and only `ad_calib` has many long windows. Mahalanobis drops to 0.863 in the 33–64 bin,
   and kNN collapses there (0.012 / 0.005), which is where its pooled inversion comes from.
 
-**Most likely cause of the new calibration problem (hypothesis, not tested):** the session
+**First hypothesis for the new calibration problem (refined by the 2026-10-08 follow-up
+below, which places the cause in a traffic burst inside session 2):** the session
 mix differs between the AD splits. `ad_calib` is 59% session 2 and has longer windows
 (median 34); `ad_fit` is 27% session 2 (median 18); `val` is 65% session 2 but has short
 windows (median 18). Taking equal shares of *active time* from bursty sessions gives each
 role a different traffic mix. `ad_calib` then contains traffic that is far from `ad_fit`
 yet absent from `val`, which inflates its score quantiles.
+
+## Follow-up (2026-10-08): where the `ad_calib` tail comes from
+
+Check 1 below, run without reading `val`. It joins the Mahalanobis scores of the `ad_fit`
+and `ad_calib` rows in this run's `scores.parquet` to the `session` column of the split
+parquets through `flow_key`. The `val` rows are filtered out when the file is scanned.
+Only 17 flow keys occur in more than one session, and these were assigned to the
+earliest one.
+
+| Split · session | Windows | Median length | Median score | 99th percentile | Share > 10,000 |
+|---|---|---|---|---|---|
+| `ad_fit` · 0 | 6,335 | 16 | 184 | 1,571 | 0% |
+| `ad_fit` · 2 | 6,576 | 18 | 199 | 1,361 | 0.02% |
+| `ad_fit` · 3 | 7,089 | 31 | 410 | 2,373 | 0% |
+| `ad_calib` · 0 | 5,119 | 16 | 196 | 8,915 | 0.5% |
+| `ad_calib` · 2 | 8,233 | 63 | 13,491 | 19,961 | **74.5%** |
+| `ad_calib` · 3 | 6,648 | 34 | 488 | 1,884 | 0.02% |
+
+The `ad_calib` threshold at the 99th percentile is 18,993.
+
+**Finding: the whole calibration tail comes from session 2's piece of `ad_calib`.**
+Sessions 0 and 3 calibrate normally: their `ad_calib` pieces score like their `ad_fit`
+pieces. Session 2's `ad_calib` piece is the day-36 traffic burst (about 1.1M packets in
+~35 minutes of active time). Its windows are long (median 63, against 18 in session 2's
+`ad_fit` piece) and three quarters of them score above 10,000, in the attacks' range. On
+the active clock, `ad_fit`'s piece of session 2 falls in the quieter stretch before the
+burst, and `ad_calib`'s piece falls in the burst. Nothing like the burst traffic is in
+`ad_fit`, so the threshold is set by traffic the detector never saw. That is why almost
+no attack passes it.
+
+This replaces the earlier hypothesis that the *session mix* differs between the AD splits.
+The cause is a change in traffic over time **within** session 2. It also connects to
+window length: the burst's dense traffic is what produces the long windows.
+
+**Likely but not checked:** the normal clusters that score in the attack range in this
+run's projection figure (the upper-middle group, `val` and `ad_calib` points with almost
+no `ad_fit` among them) are session-2 burst windows. Confirming it would mean breaking
+down `val` by session, which is another look at the held-out set, so it was not done.
+
+Options under consideration (none chosen yet):
+- packet quantiles within each session, so every role gets a proportional slice of the
+  burst;
+- treating the burst as its own session (a shorter gap, or an explicit rule on traffic
+  rate);
+- keeping the split and documenting the burst as a regime `ad_fit` does not cover.
 
 ## Structure fine-tune: collapse
 
@@ -135,10 +181,9 @@ not exported or evaluated; the stage-1 model was used instead.
 
 None has been run. Each one that reads `val` spends it again.
 
-1. **Per-session score distributions of `ad_calib` vs `val`** (from this run's
-   `scores.parquet`, joining the `session` column through `flow_key`): checks whether the
-   heavy `ad_calib` tail comes from one session. This reads `val` scores that are already
-   written.
+1. ~~**Per-session score distributions**~~ **Done 2026-10-08 for `ad_fit` and
+   `ad_calib`, without reading `val`.** The tail comes from session 2's burst; see the
+   follow-up above.
 2. **Calibrate per session, or weight `ad_calib` to `val`'s session mix:** a change to the
    detector protocol, so it needs a decision first.
 3. **Packet quantiles within each session** instead of active time. This gives every role
