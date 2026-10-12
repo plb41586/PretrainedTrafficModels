@@ -97,7 +97,7 @@ STAGE1_CKPT = (f"{TRAINING_OUTPUT_ROOT}/{STAGE1_RUN}/"
 # separate directories. Checkpoints keep stage 1's `SequenceLevelAutoEncoder_` prefix
 # on purpose: SequenceEmbeddingAD.py builds its path from that prefix, so exporting
 # this model's embeddings needs only its RUN_NAME constant changed.
-RUN_NAME = "SeqAEStruct_IIoTset_d128_Mamba_s512_pair_l010"
+RUN_NAME = "SeqAEStruct_IIoTset_d128_Mamba_s512_pair_l001"
 DEVICE_INDEX = 1               # leaves cuda:0 free for a concurrent lambda sweep
 
 ### Data -- must match stage 1 and CachePacketLatents
@@ -117,9 +117,11 @@ PACKETS_PER_SEQUENCE = 65      # P, including the slot the seq-CLS overwrites
 # groups) -- coarser still, so the pair is the best of the three here.
 COARSE_KEY = "endpoint_pair"
 TAU = 0.2                      # higher temperature -> looser cluster
-LAMBDA_STRUCT = 0.1            # the sweep knob. 0.3 collapsed effective rank 34.7 -> 7.5
+LAMBDA_STRUCT = 0.01           # the sweep knob. 0.3 collapsed effective rank 34.7 -> 7.5
                                # and pooled silhouette peaked at epoch 0 then decayed,
                                # so the sweep runs downward from there, not up.
+                               # On the 1-day session split 0.1 went 26.9 -> 1.9 within one
+                               # epoch (docs/experiments/2026-10-07-...), hence 0.01 next.
 BALANCE_GROUPS = True          # equal weight per group, not per anchor
 MIN_TRAIN_FLOWS = 8            # a group needs this many train flows to count as supported
 

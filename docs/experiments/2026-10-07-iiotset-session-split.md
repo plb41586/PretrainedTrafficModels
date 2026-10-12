@@ -33,7 +33,9 @@ and is therefore informed by them.
 Code: committed together with this entry. Split: `SplitFlowsDF` with `session_gap_s =
 86400`, `min_session_share = 0.01`, `boundary_mode = "active_time"`, `pause_cap_s = 60`,
 and fractions `train` .40 / `test` .10 / `ad_fit` .20 / `ad_calib` .20 / `val` .10
-(no `late`). The first run's artefacts are under `archive/2026-09-25-sixsplit/`.
+(no `late`). The first run's artefacts are under `archive/2026-09-25-sixsplit/`. Since
+2026-10-11 this run's artefacts (split, cache, runs, embeddings, AD outputs) are under
+`archive/2026-10-07-sessionsplit/`, at the same relative paths.
 
 | Stage | Run / output | Result |
 |---|---|---|
@@ -166,6 +168,53 @@ Options under consideration (none chosen yet):
 - treating the burst as its own session (a shorter gap, or an explicit rule on traffic
   rate);
 - keeping the split and documenting the burst as a regime `ad_fit` does not cover.
+
+## Follow-up (2026-10-11): how the capture was recorded
+
+A timing-only profile of `NormalMerged.parquet` (timestamps, no payload, no labels)
+split the traffic wherever two packets are more than 5 minutes apart:
+
+| Segment | Hours since start | Duration | Packets | Packets/min | Pause before | Session (1-day gap) |
+|---|---|---|---|---|---|---|
+| 0 | 0.0 | 503 min | 754,658 | 1,500 | — | 0 |
+| 1 | 8.6 | 133 min | 129,287 | 970 | 10.6 min | 0 |
+| 2 | 27.8 | 436 min | 394,593 | 906 | 17.1 h | 0 |
+| 3 | 52.2 | 192 min | 190,185 | 993 | 17.1 h | 0 |
+| 4 | 56.7 | 163 min | 156,137 | 958 | 80.3 min | 0 |
+| 5 | 685.6 | 18 min | 7,020 | 387 | 26.1 days | 1 (dropped) |
+| 6 | 876.2 | 27 min | 1,143,909 | **42,576** | 7.9 days | 2 |
+| 7 | 876.8 | 75 min | 759,557 | 10,202 | 9.4 min | 2 |
+| 8 | 878.9 | 31 min | 170,393 | 5,564 | 50.6 min | 2 |
+| 9 | 881.1 | 42 min | 1,807,820 | **42,920** | 98.0 min | 2 |
+| 10 | 1067.2 | 12 min | 494,599 | **42,727** | 7.7 days | 3 |
+| 11 | 1069.1 | 31 min | 1,308,193 | **42,955** | 98.9 min | 3 |
+| 12 | 1074.0 | 24 min | 1,070,474 | **44,693** | 263.5 min | 3 |
+| 13 | 1074.5 | 72 min | 155,887 | 2,166 | 8.1 min | 3 |
+| 14 | 1077.0 | 136 min | 1,200,571 | 8,804 | 80.1 min | 3 |
+
+**What this says about the dataset.** The normal capture was not recorded as one
+experiment. It was produced in a series of separate runs, sometimes hours apart within a
+day and sometimes days or weeks apart. The settings most likely changed by hand between
+runs: the packet rate jumps between runs and is roughly constant within one.
+
+- Some runs are alike, at least in packet rate. Five segments (6, 9, 10, 11, 12) run at
+  ~43,000 packets/min in two sessions a week apart, which points to one high-rate setting
+  being used repeatedly.
+- Other runs are entirely different: ~1,000 packets/min on days 0–2, and 2,000–10,000
+  packets/min in segments 7, 8, 13 and 14.
+- A 1-day gap groups runs with very different settings into one session.
+
+This was inferred from timing alone. No dataset README or label file was read.
+
+**Consequence for the session split.** In the 2026-10-07 run, `train` got the high-rate
+segments 6, 10, 11 and 12, and `ad_fit` got none. `ad_calib` got the first ~24 minutes of
+segment 9 and `val` the rest of it, which explains the calibration failure in the previous
+follow-up. With `session_gap_s` between 80.3 and 98.0 minutes, segment 9 becomes its own
+session and every role gets a piece of it. The margin is thin (the 98.0-minute pause
+before segment 9 against 80.3 and 80.1 minutes inside other sessions), and high-rate
+segments 6 and 12 stay grouped with lower-rate runs. The next run uses a 90-minute gap.
+A rule based on packet rate would not depend on this margin; it was noted as an
+alternative and not pursued.
 
 ## Structure fine-tune: collapse
 

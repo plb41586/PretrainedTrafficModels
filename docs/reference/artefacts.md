@@ -33,8 +33,9 @@ archive/                                             temporary, git-ignored; rea
 ├── <same relative paths as above>                   pre-six-role artefacts (the old IIoTset
 │                                                    split, runs trained on it, deprecated_*
 │                                                    extractor output, legacy AD outputs)
-└── 2026-09-25-sixsplit/<same relative paths>        the first, strict six-split IIoTset run
-                                                     Both kept for comparison, see docs/experiments/
+├── 2026-09-25-sixsplit/<same relative paths>        the first, strict six-split IIoTset run
+└── 2026-10-07-sessionsplit/<same relative paths>    the IIoTset session split with a 1-day gap
+                                                     All kept for comparison, see docs/experiments/
 ```
 
 ## Dataset registry

@@ -345,14 +345,18 @@ if __name__ == "__main__":
         ("ad_calib", 0.20),
         ("val",      0.10),
     )
-    # IIoTset is four separate recording sessions (days 0-2, 28, 36, 44 of a 45-day span;
-    # docs/experiments/). A strict split handed whole sessions to roles: the first
-    # six-split run fitted the AEs on days 0-36 and took every AD split from day 44.
-    # So each session is cut into the roles on its own clock instead.
+    # IIoTset was recorded as a series of separate runs with different settings, hours to
+    # weeks apart (docs/experiments/2026-10-07-iiotset-session-split.md, 2026-10-11
+    # follow-up). A strict split handed whole runs to roles: the first six-split run fitted
+    # the AEs on days 0-36 and took every AD split from day 44. So each session is cut into
+    # the roles on its own clock instead.
     BOUNDARY_MODE = "active_time"   # within each session: shares of its recorded time
-    PAUSE_CAP_S = 60                # sessions have 1-3 h internal pauses (day 44) and ~16 h
-                                    # overnight ones (days 0-2); they count as 60 s
-    SESSION_GAP_S = 86_400          # a pause longer than a day starts a new session
+    PAUSE_CAP_S = 60                # pauses inside a session count as 60 s
+    # 90 min: the high-rate run at hour 881 (segment 9) follows a 98.0-min pause, while the
+    # longest pauses inside runs that belong together are 80.3 and 80.1 min. The 1-day gap
+    # of the 2026-10-07 run merged it into session 2, so ad_fit never saw high-rate
+    # traffic. Gives 8 kept sessions.
+    SESSION_GAP_S = 5_400           # a pause longer than this starts a new session
     MIN_SESSION_SHARE = 0.01        # day 28 (7,020 packets, 0.07%) is too small to cut
     DRY_RUN = False                 # set True to print the report without writing
 

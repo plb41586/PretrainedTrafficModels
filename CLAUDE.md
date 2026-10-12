@@ -94,9 +94,10 @@ Never break these. The linked doc explains why each one exists.
 - **`SplitFlowsDF` is the only splitter.** Do not reintroduce a packet-level (row-slice)
   split. A flow appearing in several splits is intended; a boundary that is not a clean
   time boundary is a bug. The goal is one contiguous interval per split. The only
-  sanctioned deviation is a capture made of separate recording sessions (`session_gap_s`):
-  then each session is cut on its own clock, and every boundary is still a clean time
-  boundary within its session. (`docs/components/02-temporal-split.md § Sessions`)
+  sanctioned deviation is a capture made of separate recording sessions or runs with
+  different settings, separated by pauses longer than `session_gap_s`. Then each session
+  is cut on its own clock, and every boundary is still a clean time boundary within its
+  session. (`docs/components/02-temporal-split.md § Sessions`)
 - **Do not mix `flow_key` formats within one artefact lineage.** A re-extracted capture
   needs its split, caches, checkpoints and embeddings regenerated together, and the
   provenance asserts must stay in place. (`docs/reference/artefacts.md § Lineage`)

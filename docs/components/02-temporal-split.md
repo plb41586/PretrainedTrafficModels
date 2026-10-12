@@ -69,7 +69,11 @@ is one continuous recording. A strict split's `val` is then a genuinely later pe
 which is the most honest test.
 
 **Exception: a capture made of separate recording sessions** that were run one after
-another, possibly with different settings or simulated environments. A strict split
+another, possibly with different settings or simulated environments. A session is
+whatever lies between pauses longer than `session_gap_s`. That can be a recording days
+apart from the next, or a run a few hours after the previous one with changed settings.
+Choose the gap from a timing profile of the capture, so that it separates runs whose
+traffic differs, not only recordings on different days. A strict split
 then hands whole sessions to roles: the AEs train on the early sessions and every AD
 split comes from the last one. The evaluation measures the jump between environments
 instead of held-out time. That is what happened on IIoTset
@@ -120,7 +124,7 @@ The splits run in the six-role order, which is the `DatasetPaths.splits` default
 | Capture | Splits | Produced by |
 |---|---|---|
 | `CICAPT-IIoT` | all six | the current `split_flows` |
-| `IIoTset-Ferrag` | five, without `late` | a session split ([§ Sessions](#sessions)). The capture is four recording sessions (days 0–2, 28, 36 and 44 of a 45-day span); day 28 (0.07% of packets) is dropped, and each other session is cut by quantiles of its own active time (`boundary_mode="active_time"`, pauses capped at 60 s), because the sessions have internal pauses of hours. Results: [experiment diary](../experiments/2026-10-07-iiotset-session-split.md). The first, strict six-split run took every AD split from the day-44 session ([experiment diary](../experiments/2026-09-25-iiotset-six-split-first-run.md)). Earlier generations are in `archive/` ([artefacts § Directory layout](../reference/artefacts.md#directory-layout)) |
+| `IIoTset-Ferrag` | five, without `late` | a session split ([§ Sessions](#sessions)) with `session_gap_s` = 90 min, which gives 8 kept sessions. The capture was recorded as a series of separate runs with different settings, sometimes hours and sometimes weeks apart; the 90-minute gap separates the high-rate run at hour 881 from the runs before it ([experiment diary, 2026-10-11 follow-up](../experiments/2026-10-07-iiotset-session-split.md#follow-up-2026-10-11-how-the-capture-was-recorded)). Results: [experiment diary](../experiments/2026-10-12-iiotset-90min-session-split.md). Each session is cut by quantiles of its own active time (`boundary_mode="active_time"`, pauses capped at 60 s), and the day-28 run (0.07% of packets) is dropped. Earlier generations: the strict six-split run (`archive/2026-09-25-sixsplit/`) and the session split with a 1-day gap (`archive/2026-10-07-sessionsplit/`), see [artefacts § Directory layout](../reference/artefacts.md#directory-layout) |
 
 ## Scope
 

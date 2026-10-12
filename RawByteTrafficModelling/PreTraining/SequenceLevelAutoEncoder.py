@@ -81,11 +81,12 @@ SEQ_BACKBONE = "Mamba"         # "Mamba" | "Transformer" (swap MambaBackbonePara
 # The reference budget is the original IIoTset run: 40 epochs x 346 steps = 13840 steps,
 # with WARMUP_STEPS 3.6% of the schedule. An epoch is one window per flow, so the epoch
 # count scales inversely with the train flow count to hold that budget:
-#   IIoTset session-split train  96542 flows -> 378 steps/epoch -> 37 epochs (~14.0k steps)
+#   IIoTset session split, 90-min gap  126122 flows -> 493 steps/epoch -> 28 epochs (~13.8k steps)
+#   (session split, 1-day gap: 96542 flows -> 378 steps/epoch -> 37 epochs)
 #   (the first, strict six-split run: 78691 flows -> 308 steps/epoch -> 45 epochs)
 #   CICAPT train            21829 flows ->   86 steps/epoch -> 160 epochs
 # so runs differ in their data and not in their optimisation budget.
-Epochs = 37
+Epochs = 28
 batch_size = 256
 val_batch_size = 256
 learning_rate = 3e-4

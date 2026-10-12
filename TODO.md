@@ -42,11 +42,11 @@ Blocks running the pipeline end to end on a second capture. The details are in t
 linked docs, so they are not repeated here. Mechanism changes (role mapping, how to handle
 oversize frames, re-splitting) need to be agreed with the user before implementing.
 
-- [ ] **Decide how to proceed after the IIoTset session-split run.** The short-window and
-      FPR-overshoot failures are fixed, but the thresholds now overshoot the other way and
-      the structure fine-tune collapses →
-      `docs/experiments/2026-10-07-iiotset-session-split.md` (§ Checks).
-- [ ] **Delete `archive/`** (three-split and first six-split generations) once the
+- [ ] **Check the long-window length confound in the third IIoTset run.** AD works on the
+      90-minute session split (stage 1 and fine-tune alike), but long attack windows have
+      no length-matched normals in `val` →
+      `docs/experiments/2026-10-12-iiotset-90min-session-split.md` (§ Checks 2–3).
+- [ ] **Delete `archive/`** (three-split, first six-split and 1-day session-split generations) once the
       comparisons in `docs/experiments/` are no longer needed.
 - [ ] **`ID_Encoder` raises on frames of 1520 bytes or more** (jumbo frames, TSO/GRO captures)
       → `docs/reference/data-representation.md § Constants`.
