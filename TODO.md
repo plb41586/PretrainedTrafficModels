@@ -46,8 +46,6 @@ oversize frames, re-splitting) need to be agreed with the user before implementi
       90-minute session split (stage 1 and fine-tune alike), but long attack windows have
       no length-matched normals in `val` →
       `docs/experiments/2026-10-12-iiotset-90min-session-split.md` (§ Checks 2–3).
-- [ ] **Delete `archive/`** (three-split, first six-split and 1-day session-split generations) once the
-      comparisons in `docs/experiments/` are no longer needed.
 - [ ] **`ID_Encoder` raises on frames of 1520 bytes or more** (jumbo frames, TSO/GRO captures)
       → `docs/reference/data-representation.md § Constants`.
 

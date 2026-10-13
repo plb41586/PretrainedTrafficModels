@@ -72,8 +72,9 @@ cannot read off the bytes: it has to learn a behavioural fingerprint of the devi
   to provide negatives. `BALANCE_GROUPS` gives each group equal weight instead of each
   anchor.
 - **Metrics:** reported pooled, for supported groups only (`*_sup`), and per `seq_len` bin.
-- **Current configuration:** IIoTset-specific. `STAGE1_RUN`, `DATASET`, `CACHE_TAG` and
-  `PACKET_AE_CKPT` all point at the IIoTset runs trained on the six-role split
+- **Current configuration:** CICAPT-specific. `STAGE1_RUN`, `DATASET`, `CACHE_TAG` and
+  `PACKET_AE_CKPT` all point at the CICAPT runs. The IIoTset configuration of the third
+  run is in commit `7b0536f`
   ([02 § Current state](02-temporal-split.md#current-state)).
 
 ## Reuse

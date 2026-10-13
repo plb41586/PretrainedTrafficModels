@@ -123,7 +123,7 @@ The splits run in the six-role order, which is the `DatasetPaths.splits` default
 
 | Capture | Splits | Produced by |
 |---|---|---|
-| `CICAPT-IIoT` | all six | the current `split_flows` |
+| `CICAPT-IIoT` | all six | the current `split_flows`, strict (one session, packet boundaries). A timing profile shows one continuous recording: 95.9 h with no pause longer than a few seconds, a steady ~122k packets/h and ~1,850 flows/h, a +9% peak every 6 hours, and one short burst at hour 22 (216k packets, normal flow count). So a session split does not apply. Retrained on the same split ([experiment diary](../experiments/2026-10-13-cicapt-retrain.md)); the first generation (cache and runs from 2026-09-02) is in `archive/2026-09-02-cicapt-sixsplit/` |
 | `IIoTset-Ferrag` | five, without `late` | a session split ([§ Sessions](#sessions)) with `session_gap_s` = 90 min, which gives 8 kept sessions. The capture was recorded as a series of separate runs with different settings, sometimes hours and sometimes weeks apart; the 90-minute gap separates the high-rate run at hour 881 from the runs before it ([experiment diary, 2026-10-11 follow-up](../experiments/2026-10-07-iiotset-session-split.md#follow-up-2026-10-11-how-the-capture-was-recorded)). Results: [experiment diary](../experiments/2026-10-12-iiotset-90min-session-split.md). Each session is cut by quantiles of its own active time (`boundary_mode="active_time"`, pauses capped at 60 s), and the day-28 run (0.07% of packets) is dropped. Earlier generations: the strict six-split run (`archive/2026-09-25-sixsplit/`) and the session split with a 1-day gap (`archive/2026-10-07-sessionsplit/`), see [artefacts § Directory layout](../reference/artefacts.md#directory-layout) |
 
 ## Scope

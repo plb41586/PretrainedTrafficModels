@@ -89,7 +89,7 @@ import torch.nn.functional as F
 import math
 
 ### The stage-1 run this fine-tunes
-STAGE1_RUN = "SeqAE_IIoTset_d128_Mamba_s512"
+STAGE1_RUN = "SeqAE_CICAPT_d128_Mamba_s512"
 STAGE1_CKPT = (f"{TRAINING_OUTPUT_ROOT}/{STAGE1_RUN}/"
                f"SequenceLevelAutoEncoder_{STAGE1_RUN}_best.ckpt")
 
@@ -97,14 +97,14 @@ STAGE1_CKPT = (f"{TRAINING_OUTPUT_ROOT}/{STAGE1_RUN}/"
 # separate directories. Checkpoints keep stage 1's `SequenceLevelAutoEncoder_` prefix
 # on purpose: SequenceEmbeddingAD.py builds its path from that prefix, so exporting
 # this model's embeddings needs only its RUN_NAME constant changed.
-RUN_NAME = "SeqAEStruct_IIoTset_d128_Mamba_s512_pair_l001"
+RUN_NAME = "SeqAEStruct_CICAPT_d128_Mamba_s512_pair_l001"
 DEVICE_INDEX = 1               # leaves cuda:0 free for a concurrent lambda sweep
 
 ### Data -- must match stage 1 and CachePacketLatents
-DATASET = DATASETS["IIoTset-Ferrag"]
-CACHE_TAG = "PacketAE_IIoTset_d128_best"
-PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_IIoTset_d128/"
-                  "PacketLevelAutoEncoder_PacketAE_IIoTset_d128_best.ckpt")
+DATASET = DATASETS["CICAPT-IIoT"]
+CACHE_TAG = "PacketAE_CICAPT_d128_best"
+PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_CICAPT_d128/"
+                  "PacketLevelAutoEncoder_PacketAE_CICAPT_d128_best.ckpt")
 TRAIN_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "train")
 TEST_LATENT_CACHE = DATASET.latent_cache(CACHE_TAG, "test")
 TEST_SPLIT_FILE = DATASET.test  # byte eval needs the raw packets the test cache was built from
@@ -126,7 +126,10 @@ BALANCE_GROUPS = True          # equal weight per group, not per anchor
 MIN_TRAIN_FLOWS = 8            # a group needs this many train flows to count as supported
 
 ### Optimisation -- a fine-tune, not a fresh run
-Epochs = 15
+# Held at a ~7.4k-step budget across captures (one epoch is one window per train flow):
+#   IIoTset 90-min session split  126122 flows -> 493 steps/epoch -> 15 epochs
+#   CICAPT                         21829 flows ->  86 steps/epoch -> 86 epochs
+Epochs = 86
 batch_size = 256
 val_batch_size = 256
 learning_rate = 5e-5

@@ -29,14 +29,26 @@ RawByteTrafficModelling/
     ├── Embeddings/SequenceEmbeddings_<RUN_NAME>/    stage 6
     └── AD/<RUN_NAME>_eval-<split>/                  stage 7
 
-archive/                                             temporary, git-ignored; read by nothing
+archive/                                             git-ignored; read by no pipeline script
 ├── <same relative paths as above>                   pre-six-role artefacts (the old IIoTset
 │                                                    split, runs trained on it, deprecated_*
 │                                                    extractor output, legacy AD outputs)
+├── 2026-09-02-cicapt-sixsplit/<same relative paths> the first CICAPT generation (cache and runs;
+│                                                    its split stays in place and is reused)
 ├── 2026-09-25-sixsplit/<same relative paths>        the first, strict six-split IIoTset run
 └── 2026-10-07-sessionsplit/<same relative paths>    the IIoTset session split with a 1-day gap
-                                                     All kept for comparison, see docs/experiments/
 ```
+
+**`archive/` is kept, not temporary.** Each split generation, with its split, caches,
+checkpoints, embeddings and AD outputs, is a result in its own right. Together they
+document how the split choice changes AD efficacy (see the
+[experiment diary](../experiments/README.md)), and any AD built later has to be judged
+against them. Archive a superseded generation under a dated directory; do not delete it.
+
+The only discardable part is what was produced with the **old (pre-merge) feature
+extractor**: the `data_artefacts/deprecated_*` trees, `TrainingOutputs/_deprecated/`, and
+the runs and outputs named `EdgeIIoT` (including `ReconstructionLosses/`, whose log is an
+EdgeIIoT run).
 
 ## Dataset registry
 
@@ -122,7 +134,7 @@ through its matching `load_*` function; see
 | `_E<n>` | end of epoch *n* |
 | `_best` | end of an epoch that improves the selection metric on `test` |
 
-Downstream stages always load `_best`. A sequence-AE checkpoint contains the frozen
+Downstream stages load `_best`, except that the export can be pointed at an epoch checkpoint (`SequenceEmbeddingAD.py · CKPT_SUFFIX`), because a fine-tune's best-by-reconstruction checkpoint can be its first epoch. A sequence-AE checkpoint contains the frozen
 packet encoder's weights under `encoder.packet_encoder.*`, so stage 6 does not need the
 packet-AE checkpoint.
 

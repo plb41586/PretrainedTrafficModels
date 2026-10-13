@@ -44,16 +44,16 @@ import torch.nn.functional as F
 import math
 
 ### Set Training Parameters
-RUN_NAME = "PacketAE_IIoTset_d128"
-DATASET = DATASETS["IIoTset-Ferrag"]
+RUN_NAME = "PacketAE_CICAPT_d128"
+DATASET = DATASETS["CICAPT-IIoT"]
 DEVICE_INDEX = 0               # AE on cuda:0, the MLM run takes cuda:1 concurrently
 
 ENCODER_DIM = 128              # was 64; the old run's non-pad accuracy plateaued at ~0.554
 ENCODER_LAYERS = 2             # unchanged, so width is the only variable vs. that run
 DECODER_LAYERS = 2
 
-# Measured ~2.0 s/step at bs=512 on one A5000. IIoTset session-split train (90-min gap) is 4.63M packets
-# -> ~9.0k steps (~5.0 h) per epoch.
+# Measured ~2.0 s/step at bs=512 on one A5000. CICAPT train is 6.66M packets
+# -> ~13.0k steps (~7.2 h) per epoch. (IIoTset 90-min session split: 4.63M, ~9.0k steps.)
 # The cosine schedule spans the whole run, so changing this changes the LR curve
 # rather than just truncating it.
 Epochs = 2
@@ -71,8 +71,8 @@ AMP_DTYPE = torch.bfloat16     # None disables autocast
 # with _deprecated/EdgeIIoT_AutoEncoder_FlowSplit (test CE 0.13794, non-pad 0.554).
 PAD_LOSS_WEIGHT = 0.1
 
-# One train epoch is ~4.6M packets (~9.0k batches at bs=512), so per-batch logging
-# and a full pass over the ~0.77M-packet test split are both far too expensive.
+# One train epoch is ~6.7M packets (~13.0k batches at bs=512), so per-batch logging
+# and a full pass over the ~1.2M-packet test split are both far too expensive.
 # Log running averages on an interval, and evaluate on a fixed random subset of
 # test drawn once so the number is comparable across evals.
 log_every_n_batches = 200

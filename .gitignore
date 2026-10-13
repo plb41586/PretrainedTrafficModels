@@ -7,8 +7,8 @@ training_outputs/* # Training outputs temporarily stored
 # is ~8 MB and a projection.png ~2 MB.
 RawByteTrafficModelling/PreTraining/TrainingOutputs/
 RawByteTrafficModelling/AnomalyDetection/Outputs/
-# Superseded artefacts parked until their replacements are confirmed, then deleted
-# (docs/reference/artefacts.md § Directory layout).
+# Earlier split generations, kept as results; only old-extractor artefacts in here are
+# discardable (docs/reference/artefacts.md § Directory layout).
 archive/
 
 # Auto generated reports

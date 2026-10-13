@@ -48,13 +48,20 @@ import os
 ### Set Export Parameters
 # The sequence-AE run to export. s512 was chosen from the width sweep: it reaches 96.7%
 # of the packet-decoder byte-accuracy ceiling at 45% of s768's parameters.
-RUN_NAME = "SeqAE_IIoTset_d128_Mamba_s512"
+RUN_NAME = "SeqAEStruct_CICAPT_d128_Mamba_s512_pair_l001"
+# Which checkpoint of that run: "best" (the default, picked by validation reconstruction +
+# length loss) or an epoch such as "E85". A fine-tune's best-by-reconstruction checkpoint
+# can be its first epoch -- on CICAPT it was, while the structure kept improving -- so the
+# last epoch is exported explicitly then. A non-default suffix also names the output dir,
+# so it can never be mistaken for the _best export.
+CKPT_SUFFIX = "E85"
 SEQ_AE_CKPT = (f"RawByteTrafficModelling/PreTraining/TrainingOutputs/{RUN_NAME}/"
-               f"SequenceLevelAutoEncoder_{RUN_NAME}_best.ckpt")
-output_dir = f"RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_{RUN_NAME}"
+               f"SequenceLevelAutoEncoder_{RUN_NAME}_{CKPT_SUFFIX}.ckpt")
+output_dir = (f"RawByteTrafficModelling/AnomalyDetection/Outputs/Embeddings/SequenceEmbeddings_{RUN_NAME}"
+              + ("" if CKPT_SUFFIX == "best" else f"_{CKPT_SUFFIX}"))
 
-DATASET = DATASETS["IIoTset-Ferrag"]
-CACHE_TAG = "PacketAE_IIoTset_d128_best"       # must match CachePacketLatents
+DATASET = DATASETS["CICAPT-IIoT"]
+CACHE_TAG = "PacketAE_CICAPT_d128_best"        # must match CachePacketLatents
 
 # Which sections of DATASET this run reads, and as what. Nothing outside this map is
 # opened; every read is logged as a DATA ACCESS line (RunConfig.DataRoles).
@@ -65,7 +72,7 @@ CACHE_TAG = "PacketAE_IIoTset_d128_best"       # must match CachePacketLatents
 #   cross_check  a split read both ways to prove the two paths agree; needs a cache
 DATA_ROLES = {
     "cached":      ("train", "test"),
-    "token":       ("ad_fit", "ad_calib", "val"),
+    "token":       ("ad_fit", "ad_calib", "val", "late"),   # IIoTset has no late
     "attack":      (ALL_ATTACKS,),
     "cross_check": ("test",),
 }

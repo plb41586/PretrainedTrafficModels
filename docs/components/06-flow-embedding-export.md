@@ -7,10 +7,10 @@ Consumers of the export (stage 7, UMAP plots) need no torch code.
 
 **Entry point:** `RawByteTrafficModelling/AnomalyDetection/SequenceEmbeddingAD.py`.
 
-**Consumes:** the sequence-AE `_best` checkpoint (`RUN_NAME`), the latent caches of the
+**Consumes:** a sequence-AE checkpoint (`RUN_NAME`, `CKPT_SUFFIX`: `_best` by default), the latent caches of the
 `cached` splits, the split parquets of the `token` splits, and the `attack` captures
 (`DATASET.attack(name)`).
-**Produces:** `Outputs/Embeddings/SequenceEmbeddings_<RUN_NAME>/`, containing `<label>.npy`
+**Produces:** `Outputs/Embeddings/SequenceEmbeddings_<RUN_NAME>[_<CKPT_SUFFIX>]/` (the suffix only when it is not `best`), containing `<label>.npy`
 and `metadata.parquet` ([artefacts § Embedding directory](../reference/artefacts.md#embedding-directory-stage-6--stage-7)).
 
 ## Where the logic lives
@@ -50,7 +50,7 @@ split name for normal sets.
 
 ## Configuration
 
-`RUN_NAME` (the checkpoint to export), `DATASET`, `CACHE_TAG`, `DATA_ROLES`,
+`RUN_NAME` (the run to export), `CKPT_SUFFIX` (which of its checkpoints; `best` by default), `DATASET`, `CACHE_TAG`, `DATA_ROLES`,
 `MAX_WINDOWS_PER_SET`, `SMOKE` (two attack files and small caps, written to a separate
 directory).
 

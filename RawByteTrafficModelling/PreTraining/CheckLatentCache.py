@@ -22,11 +22,11 @@ import numpy as np
 import torch
 
 # Must match CachePacketLatents' constants, or load_latent_cache's sha256 check fails.
-DATASET = DATASETS["IIoTset-Ferrag"]
-CACHE_TAG = "PacketAE_IIoTset_d128_best"
+DATASET = DATASETS["CICAPT-IIoT"]
+CACHE_TAG = "PacketAE_CICAPT_d128_best"
 SPLIT = "test"                 # "train" is the same checks over 5.5x more rows
-PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_IIoTset_d128/"
-                  "PacketLevelAutoEncoder_PacketAE_IIoTset_d128_best.ckpt")
+PACKET_AE_CKPT = ("RawByteTrafficModelling/PreTraining/TrainingOutputs/PacketAE_CICAPT_d128/"
+                  "PacketLevelAutoEncoder_PacketAE_CICAPT_d128_best.ckpt")
 SPLIT_FILE = DATASET.split(SPLIT)
 CACHE_DIR = DATASET.latent_cache(CACHE_TAG, SPLIT)
 PACKETS_PER_SEQUENCE = 65
